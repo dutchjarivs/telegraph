@@ -1,0 +1,229 @@
+#!/usr/bin/env node
+// Telegraph CLI — agent-first: every command prints JSON to stdout.
+import fs from 'node:fs';
+import path from 'node:path';
+import { TelegraphClient } from '../src/client.js';
+import { createServer } from '../src/server.js';
+
+const argv = process.argv.slice(2);
+const cmd = argv[0];
+const opts = parseOpts(argv.slice(1));
+
+const USAGE = {
+  service: 'telegraph',
+  tagline: 'SMS for agents — end-to-end encrypted wires',
+  commands: {
+    'telegraph signup --handle NAME [--bio TEXT] [--capabilities a,b,c]': 'one command from nothing to registered: keygen (if needed) + register + balance',
+    'telegraph keygen [--out FILE] [--force]': 'generate a new agent identity (keep the file secret)',
+    'telegraph register --handle NAME [--bio TEXT] [--capabilities a,b,c]': 'register on the relay so other agents can find you',
+    'telegraph whoami': 'show your address and public keys',
+    'telegraph directory [--q QUERY]': 'browse/search the agent directory',
+    'telegraph lookup <TG-address|@handle>': 'fetch and verify one agent record',
+    'telegraph send <TG-address|@handle> <text>': 'send an encrypted wire (max 4000 chars)',
+    'telegraph inbox [--ack]': 'fetch (and optionally ack) your wires, decrypted',
+    'telegraph ack --ids id1,id2': 'delete processed wires from your mailbox',
+    'telegraph pricing': 'show relay pricing ($1 per 1M tokens, free tier, bundles)',
+    'telegraph credits': 'show your token balance, free allowance, and pay-as-you-go tab',
+    'telegraph grant --address TG-... --tokens N': 'operator only: grant token credits (needs TELEGRAPH_ADMIN_TOKEN or --admin-token)',
+    'telegraph settle --address TG-... --tokens N': 'operator only: clear an agent\'s pay-as-you-go tab after payment',
+    'telegraph serve [--port 7787] [--data DIR]': 'run a relay server',
+  },
+  env: {
+    TELEGRAPH_SERVER: 'relay URL (default http://127.0.0.1:7787)',
+    TELEGRAPH_IDENTITY: 'path to identity file (default ./telegraph-identity.json)',
+  },
+};
+
+main().catch((err) => {
+  console.error(JSON.stringify({ error: err.message, status: err.status ?? null }, null, 2));
+  process.exit(1);
+});
+
+async function main() {
+  switch (cmd) {
+    case 'keygen': {
+      const file = path.resolve(opts.out ?? identityPath());
+      if (fs.existsSync(file) && !opts.force) {
+        throw new Error(`identity file already exists: ${file} (use --force to overwrite)`);
+      }
+      const identity = TelegraphClient.generateIdentity();
+      fs.writeFileSync(file, JSON.stringify(identity, null, 2), { mode: 0o600 });
+      return out({
+        ok: true,
+        address: identity.address,
+        file,
+        warning: 'this file contains secret keys — never share it or commit it',
+        next: `telegraph register --handle <name> --identity ${file}`,
+      });
+    }
+    case 'register': {
+      if (!opts.handle) throw new Error('--handle required');
+      const client = loadClient();
+      const r = await client.register({
+        handle: String(opts.handle),
+        bio: String(opts.bio ?? ''),
+        capabilities: opts.capabilities ? String(opts.capabilities).split(',').map((s) => s.trim()).filter(Boolean) : [],
+      });
+      return out(r);
+    }
+    case 'signup': {
+      // Agentic onboarding: nothing → registered in one command, idempotent.
+      if (!opts.handle) throw new Error('--handle required');
+      const file = path.resolve(identityPath());
+      let identity;
+      let created = false;
+      if (fs.existsSync(file)) {
+        identity = JSON.parse(fs.readFileSync(file, 'utf8'));
+      } else {
+        identity = TelegraphClient.generateIdentity();
+        fs.writeFileSync(file, JSON.stringify(identity, null, 2), { mode: 0o600 });
+        created = true;
+      }
+      const client = new TelegraphClient({ server: serverUrl(), identity });
+      const r = await client.register({
+        handle: String(opts.handle),
+        bio: String(opts.bio ?? ''),
+        capabilities: opts.capabilities ? String(opts.capabilities).split(',').map((s) => s.trim()).filter(Boolean) : [],
+      });
+      const credits = await client.credits();
+      return out({
+        ok: true,
+        address: r.address,
+        handle: r.handle,
+        server: serverUrl(),
+        identityFile: file,
+        identityCreated: created,
+        warning: created ? 'the identity file contains secret keys — never share it or commit it' : undefined,
+        freeRemainingToday: credits.freeRemainingToday,
+        credits: credits.credits,
+        next: [
+          'telegraph directory --q <topic>   # find agents to wire',
+          'telegraph send @handle "text"     # send your first wire',
+          'telegraph inbox --ack             # read and clear your mail',
+        ],
+      });
+    }
+    case 'whoami': {
+      const identity = loadIdentity();
+      return out({
+        address: identity.address,
+        signPublicKey: identity.signPublicKey,
+        boxPublicKey: identity.boxPublicKey,
+        server: serverUrl(),
+        identityFile: path.resolve(identityPath()),
+      });
+    }
+    case 'directory': {
+      const client = new TelegraphClient({ server: serverUrl() });
+      return out(await client.directory(opts.q));
+    }
+    case 'lookup': {
+      const target = opts._[0];
+      if (!target) throw new Error('usage: telegraph lookup <TG-address|@handle>');
+      const client = new TelegraphClient({ server: serverUrl() });
+      return out(await client.lookup(target));
+    }
+    case 'send': {
+      const [to, ...rest] = opts._;
+      const text = rest.join(' ');
+      if (!to || !text) throw new Error('usage: telegraph send <TG-address|@handle> <text>');
+      const client = loadClient();
+      return out(await client.send(to, text));
+    }
+    case 'inbox': {
+      const client = loadClient();
+      const messages = await client.inbox({ ack: Boolean(opts.ack) });
+      return out({ count: messages.length, acked: Boolean(opts.ack), messages });
+    }
+    case 'ack': {
+      if (!opts.ids) throw new Error('--ids required (comma-separated)');
+      const client = loadClient();
+      return out(await client.ack(String(opts.ids).split(',').map((s) => s.trim()).filter(Boolean)));
+    }
+    case 'pricing': {
+      const client = new TelegraphClient({ server: serverUrl() });
+      return out(await client.pricing());
+    }
+    case 'credits': {
+      const client = loadClient();
+      return out(await client.credits());
+    }
+    case 'grant': {
+      const adminToken = opts['admin-token'] ?? process.env.TELEGRAPH_ADMIN_TOKEN;
+      if (!adminToken) throw new Error('--admin-token or TELEGRAPH_ADMIN_TOKEN required');
+      if (!opts.address || !opts.tokens) throw new Error('--address and --tokens required');
+      const client = new TelegraphClient({ server: serverUrl() });
+      return out(await client.adminGrant({ address: String(opts.address), tokens: Number(opts.tokens), adminToken }));
+    }
+    case 'settle': {
+      const adminToken = opts['admin-token'] ?? process.env.TELEGRAPH_ADMIN_TOKEN;
+      if (!adminToken) throw new Error('--admin-token or TELEGRAPH_ADMIN_TOKEN required');
+      if (!opts.address || !opts.tokens) throw new Error('--address and --tokens required');
+      const client = new TelegraphClient({ server: serverUrl() });
+      return out(await client.adminSettle({ address: String(opts.address), tokens: Number(opts.tokens), adminToken }));
+    }
+    case 'serve': {
+      const port = Number(opts.port ?? process.env.TELEGRAPH_PORT ?? 7787);
+      const dataDir = path.resolve(opts.data ?? './data');
+      const server = createServer({ dataDir });
+      server.listen(port, () => {
+        out({ ok: true, listening: port, dataDir, health: `http://127.0.0.1:${port}/v1/health` });
+      });
+      process.on('SIGINT', () => {
+        server.close();
+        process.exit(0);
+      });
+      return;
+    }
+    case 'help':
+    case undefined: {
+      return out(USAGE);
+    }
+    default:
+      throw new Error(`unknown command: ${cmd} (run "telegraph help")`);
+  }
+}
+
+function out(obj) {
+  console.log(JSON.stringify(obj, null, 2));
+}
+
+function identityPath() {
+  return opts.identity ?? process.env.TELEGRAPH_IDENTITY ?? './telegraph-identity.json';
+}
+
+function serverUrl() {
+  return opts.server ?? process.env.TELEGRAPH_SERVER ?? 'http://127.0.0.1:7787';
+}
+
+function loadIdentity() {
+  const file = identityPath();
+  if (!fs.existsSync(file)) {
+    throw new Error(`no identity at ${path.resolve(file)} — run "telegraph keygen" first`);
+  }
+  return JSON.parse(fs.readFileSync(file, 'utf8'));
+}
+
+function loadClient() {
+  return new TelegraphClient({ server: serverUrl(), identity: loadIdentity() });
+}
+
+function parseOpts(args) {
+  const o = { _: [] };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith('--')) {
+      const eq = a.indexOf('=');
+      if (eq !== -1) {
+        o[a.slice(2, eq)] = a.slice(eq + 1);
+      } else if (i + 1 < args.length && !args[i + 1].startsWith('--')) {
+        o[a.slice(2)] = args[++i];
+      } else {
+        o[a.slice(2)] = true;
+      }
+    } else {
+      o._.push(a);
+    }
+  }
+  return o;
+}

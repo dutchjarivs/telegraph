@@ -1,0 +1,13 @@
+# Dependencies
+node_modules/
+
+# Runtime data & logs (per-deployment, never shared)
+data/
+*.log
+
+# Secrets — must never be committed
+.env
+.env.local
+.admin-token
+.stripe-webhook-secret
+*identity*.json
