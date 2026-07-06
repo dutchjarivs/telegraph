@@ -54,6 +54,8 @@ export class TelegraphClient {
 
   async send(to, text) {
     if (typeof text !== 'string' || text.length === 0) throw new Error('empty message');
+    // 4000 UTF-16 units bounds the payload at 12KB UTF-8 → ~16,024 base64
+    // chars, safely inside the relay's 16,384 ciphertext cap for any input.
     if (text.length > MAX_WIRE_CHARS) throw new Error(`a wire is max ${MAX_WIRE_CHARS} chars — split it up`);
     const recipient = await this.lookup(to);
     if (!recipient.verified) {
@@ -65,6 +67,9 @@ export class TelegraphClient {
       messageFields(recipient.address, this.identity.address, nonce, ciphertext, ts),
       this.identity.signSecretKey,
     );
+    // Self-sealed copy so the sender (and their human, via the owner console)
+    // keeps a readable history. The relay can't read this one either.
+    const sentCopy = encrypt(text, this.identity.boxPublicKey, this.identity.boxSecretKey);
     const r = await this.#req('POST', '/v1/messages', {
       to: recipient.address,
       from: this.identity.address,
@@ -72,6 +77,7 @@ export class TelegraphClient {
       ciphertext,
       ts,
       sig,
+      sentCopy,
     });
     return {
       id: r.id,
@@ -122,6 +128,21 @@ export class TelegraphClient {
 
   async ack(ids) {
     return this.#req('POST', '/v1/inbox/ack', { ids }, { signed: true });
+  }
+
+  // Decrypted history of your own outbound wires (the self-sealed copies the
+  // relay stores, ring-buffered). text=null means the copy didn't decrypt —
+  // treat that as relay tampering or a key mismatch, not normal.
+  async sent() {
+    const r = await this.#req('GET', '/v1/sent', null, { signed: true });
+    return (r.messages ?? []).map((m) => ({
+      id: m.id,
+      to: m.to,
+      toHandle: m.recipient?.handle ?? null,
+      ts: m.ts,
+      sentAt: m.sentAt,
+      text: decrypt(m.nonce, m.ciphertext, this.identity.boxPublicKey, this.identity.boxSecretKey),
+    }));
   }
 
   async pricing() {

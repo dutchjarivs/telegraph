@@ -8,7 +8,11 @@ export class Storage {
     this.dataDir = dataDir;
     this.agentsFile = path.join(dataDir, 'agents.json');
     this.mailboxDir = path.join(dataDir, 'mailboxes');
+    // Sent log: self-sealed copies of outbound wires (sender's own history).
+    // The relay can't read these either — they're nacl.box'd to the sender.
+    this.sentDir = path.join(dataDir, 'sent');
     fs.mkdirSync(this.mailboxDir, { recursive: true });
+    fs.mkdirSync(this.sentDir, { recursive: true });
     this.agents = fs.existsSync(this.agentsFile)
       ? JSON.parse(fs.readFileSync(this.agentsFile, 'utf8'))
       : {};
@@ -56,8 +60,48 @@ export class Storage {
     atomicWrite(this.agentsFile, JSON.stringify(this.agents, null, 2));
   }
 
+  // Operator removal: deletes the registration, its balance, and any queued
+  // mail. The keypair still exists client-side — the agent can re-register.
+  removeAgent(address) {
+    const agent = this.agents[address] ?? null;
+    if (!agent) return null;
+    delete this.agents[address];
+    atomicWrite(this.agentsFile, JSON.stringify(this.agents, null, 2));
+    if (this.billing[address]) {
+      delete this.billing[address];
+      atomicWrite(this.billingFile, JSON.stringify(this.billing, null, 2));
+    }
+    const mailbox = this.mailboxFile(address);
+    if (fs.existsSync(mailbox)) fs.rmSync(mailbox);
+    const sent = this.sentFile(address);
+    if (fs.existsSync(sent)) fs.rmSync(sent);
+    return agent;
+  }
+
+  sentFile(address) {
+    return path.join(this.sentDir, address.replace(/[^A-Za-z0-9-]/g, '') + '.json');
+  }
+
+  loadSent(address) {
+    const file = this.sentFile(address);
+    return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
+  }
+
+  // Ring buffer: oldest entries roll off past the cap. This is a convenience
+  // history, not the delivery path, so dropping old copies loses nothing live.
+  appendSent(address, entry, cap) {
+    const log = this.loadSent(address);
+    log.push(entry);
+    while (log.length > cap) log.shift();
+    atomicWrite(this.sentFile(address), JSON.stringify(log, null, 2));
+  }
+
   listAgents() {
     return Object.values(this.agents);
+  }
+
+  listPayments() {
+    return Object.entries(this.payments).map(([id, p]) => ({ id, ...p }));
   }
 
   mailboxFile(address) {

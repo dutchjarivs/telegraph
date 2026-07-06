@@ -30,6 +30,7 @@ export const DEFAULT_LIMITS = {
   freeDailyTokens: 1000, // free tokens per sender per UTC day
   paygCapTokens: 250_000, // pay-as-you-go tab: tokens an agent may owe before settling
   bytesPerToken: 4, // token estimate: relay can't read plaintext, so ~4 ciphertext bytes ≈ 1 token
+  sentLogCap: 200, // self-sealed sent copies kept per agent (ring buffer, not billed)
 };
 
 export const PRICING = {
@@ -82,13 +83,17 @@ export function createServer({
   const rateMap = new Map();
   const registerMap = new Map();
   const siteFile = new URL('../site/index.html', import.meta.url);
+  const dashboardFile = new URL('../site/dashboard.html', import.meta.url);
+  const ownerFile = new URL('../site/owner.html', import.meta.url);
+  const naclFile = new URL('../node_modules/tweetnacl/nacl-fast.min.js', import.meta.url);
   const llmsFile = new URL('../llms.txt', import.meta.url);
   const protocolFile = new URL('../docs/PROTOCOL.md', import.meta.url);
   const readmeFile = new URL('../README.md', import.meta.url);
 
   const server = http.createServer((req, res) => {
     handle(req, res).catch((err) => {
-      send(res, 500, { error: 'internal_error', detail: String(err?.message ?? err) });
+      const status = Number.isInteger(err?.status) ? err.status : 500;
+      send(res, status, { error: status === 413 ? 'too_large' : 'internal_error', detail: String(err?.message ?? err) });
     });
   });
 
@@ -107,7 +112,7 @@ export function createServer({
     if (route === 'GET /' || route === 'GET /index.html') {
       const wantsHtml = (req.headers.accept ?? '').includes('text/html');
       if (wantsHtml && fs.existsSync(siteFile)) {
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
         return res.end(fs.readFileSync(siteFile));
       }
       return send(res, 200, {
@@ -118,6 +123,25 @@ export function createServer({
         pricing: '/v1/pricing',
         health: '/v1/health',
       });
+    }
+
+    // Operator dashboard: the page itself holds no secrets — every data call
+    // from it is gated by the admin token the operator types into the browser.
+    if (route === 'GET /dashboard' && fs.existsSync(dashboardFile)) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      return res.end(fs.readFileSync(dashboardFile));
+    }
+
+    // Owner console: a human loads their agent's identity file into the page;
+    // signing and decryption happen in the browser, keys never reach the relay.
+    if (route === 'GET /owner' && fs.existsSync(ownerFile)) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      return res.end(fs.readFileSync(ownerFile));
+    }
+
+    if (route === 'GET /vendor/nacl-fast.min.js' && fs.existsSync(naclFile)) {
+      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'public, max-age=86400' });
+      return res.end(fs.readFileSync(naclFile));
     }
 
     if (route === 'GET /llms.txt' && fs.existsSync(llmsFile)) {
@@ -276,7 +300,7 @@ export function createServer({
       const raw = await readRaw(req);
       const body = parseJson(raw);
       if (!body) return send(res, 400, { error: 'bad_json' });
-      const { to, from, nonce, ciphertext, ts, sig } = body;
+      const { to, from, nonce, ciphertext, ts, sig, sentCopy } = body;
       const missing = ['to', 'from', 'nonce', 'ciphertext', 'ts', 'sig'].filter(
         (k) => body[k] === undefined || body[k] === null || body[k] === '',
       );
@@ -295,6 +319,18 @@ export function createServer({
       if (typeof nonce !== 'string' || safeB64Len(nonce) !== 24) {
         return send(res, 400, { error: 'bad_nonce', hint: 'base64 of 24 bytes' });
       }
+      // Optional self-sealed copy for the sender's own history. Encrypted to
+      // the sender's box key — the relay can't read it any more than the wire.
+      if (sentCopy !== undefined) {
+        if (
+          typeof sentCopy !== 'object' || sentCopy === null ||
+          typeof sentCopy.ciphertext !== 'string' || sentCopy.ciphertext.length === 0 ||
+          sentCopy.ciphertext.length > LIMITS.ciphertextB64 ||
+          typeof sentCopy.nonce !== 'string' || safeB64Len(sentCopy.nonce) !== 24
+        ) {
+          return send(res, 400, { error: 'bad_sent_copy', hint: 'sentCopy is {nonce, ciphertext}: the wire sealed to your own box key' });
+        }
+      }
       if (!freshTs(ts, LIMITS.msgWindowMs)) {
         return send(res, 400, { error: 'stale_ts' });
       }
@@ -312,12 +348,14 @@ export function createServer({
         return send(res, 429, { error: 'rate_limited', hint: `max ${LIMITS.rate.max} wires/min` });
       }
       const mailbox = store.loadMailbox(to);
-      if (mailbox.length >= LIMITS.mailboxCap) {
-        return send(res, 507, { error: 'mailbox_full', hint: 'recipient must fetch and ack before receiving more' });
-      }
+      // Duplicate check before the cap check: resending an already-delivered
+      // wire into a full mailbox is still a duplicate, not a 507.
       const id = crypto.createHash('sha256').update(sig).digest('hex').slice(0, 24);
       if (mailbox.some((m) => m.id === id)) {
         return send(res, 200, { ok: true, id, duplicate: true });
+      }
+      if (mailbox.length >= LIMITS.mailboxCap) {
+        return send(res, 507, { error: 'mailbox_full', hint: 'recipient must fetch and ack before receiving more' });
       }
       // Charge only after every check has passed; duplicates are never charged.
       const today = new Date().toISOString().slice(0, 10);
@@ -353,8 +391,24 @@ export function createServer({
       if (fromTab) parts.push('payg');
       const charged = parts.length === 1 ? parts[0] : 'mixed';
       store.setBilling(from, bill);
-      mailbox.push({ id, to, from, nonce, ciphertext, ts, sig, receivedAt: Date.now() });
+      // senderRecord: snapshot of the sender's signed directory record at
+      // delivery time. Without it, removing the sender (or a future key
+      // rotation) makes queued wires undecryptable — the recipient needs the
+      // sender's box key to open them. The record is self-signed, so the
+      // recipient can still verify it even after the live record is gone.
+      mailbox.push({ id, to, from, nonce, ciphertext, ts, sig, receivedAt: Date.now(), senderRecord: sender });
       store.saveMailbox(to, mailbox);
+      if (sentCopy) {
+        store.appendSent(from, {
+          id,
+          to,
+          toHandle: recipient.handle, // survives recipient removal
+          nonce: sentCopy.nonce,
+          ciphertext: sentCopy.ciphertext,
+          ts,
+          sentAt: Date.now(),
+        }, LIMITS.sentLogCap);
+      }
       return send(res, 200, {
         ok: true,
         id,
@@ -370,7 +424,23 @@ export function createServer({
       const auth = checkAuth(req, url.pathname, sha256hex(''));
       if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
       const mailbox = store.loadMailbox(auth.address);
-      const messages = mailbox.map((m) => ({ ...m, sender: store.getAgent(m.from) }));
+      const messages = mailbox.map(({ senderRecord, ...m }) => ({
+        ...m,
+        // Live record first (fresh bio/handle), delivery-time snapshot as the
+        // fallback so wires stay decryptable after the sender is removed.
+        sender: store.getAgent(m.from) ?? senderRecord ?? null,
+      }));
+      return send(res, 200, { count: messages.length, messages });
+    }
+
+    if (route === 'GET /v1/sent') {
+      const auth = checkAuth(req, url.pathname, sha256hex(''));
+      if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
+      const log = store.loadSent(auth.address);
+      const messages = log.map((m) => ({
+        ...m,
+        recipient: store.getAgent(m.to) ?? (m.toHandle ? { address: m.to, handle: m.toHandle } : null),
+      }));
       return send(res, 200, { count: messages.length, messages });
     }
 
@@ -478,10 +548,8 @@ export function createServer({
     }
 
     if (route === 'POST /v1/credits/grant') {
-      if (!adminToken) return send(res, 403, { error: 'grants_disabled', hint: 'relay has no admin token configured' });
-      if (!tokenMatches(req.headers['x-telegraph-admin'], adminToken)) {
-        return send(res, 403, { error: 'bad_admin_token' });
-      }
+      const denied = checkAdmin(req, 'grants_disabled');
+      if (denied) return send(res, 403, denied);
       const raw = await readRaw(req);
       const body = parseJson(raw);
       if (!body) return send(res, 400, { error: 'bad_json' });
@@ -499,10 +567,8 @@ export function createServer({
     }
 
     if (route === 'POST /v1/credits/settle') {
-      if (!adminToken) return send(res, 403, { error: 'settle_disabled', hint: 'relay has no admin token configured' });
-      if (!tokenMatches(req.headers['x-telegraph-admin'], adminToken)) {
-        return send(res, 403, { error: 'bad_admin_token' });
-      }
+      const denied = checkAdmin(req, 'settle_disabled');
+      if (denied) return send(res, 403, denied);
       const raw = await readRaw(req);
       const body = parseJson(raw);
       if (!body) return send(res, 400, { error: 'bad_json' });
@@ -520,6 +586,88 @@ export function createServer({
       return send(res, 200, { ok: true, address, settled: before - bill.owed, owed: bill.owed });
     }
 
+    if (route === 'GET /v1/admin/overview') {
+      // Everything the operator dashboard renders, in one call: agents joined
+      // with their balances and mailbox depth, the payment ledger, and totals.
+      const denied = checkAdmin(req, 'admin_disabled');
+      if (denied) return send(res, 403, denied);
+      const today = new Date().toISOString().slice(0, 10);
+      const agents = store.listAgents().map((a) => {
+        const bill = store.getBilling(a.address);
+        const mailbox = store.loadMailbox(a.address);
+        return {
+          address: a.address,
+          handle: a.handle,
+          bio: a.bio,
+          capabilities: a.capabilities ?? [],
+          registeredAt: a.registeredAt,
+          updatedAt: a.updatedAt,
+          credits: bill.credits,
+          freeUsedToday: bill.day === today ? bill.used : 0,
+          owed: bill.owed ?? 0,
+          paidEver: !!bill.paidEver,
+          mailbox: {
+            count: mailbox.length,
+            oldestReceivedAt: mailbox.length ? mailbox[0].receivedAt : null,
+          },
+        };
+      });
+      const payments = store.listPayments().sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
+      const credited = payments.filter((p) => p.status === 'credited');
+      const unmatched = payments.filter((p) => p.status !== 'credited');
+      return send(res, 200, {
+        ok: true,
+        now: Date.now(),
+        today,
+        limits: {
+          freeDailyTokens: LIMITS.freeDailyTokens,
+          paygCapTokens: LIMITS.paygCapTokens,
+          mailboxCap: LIMITS.mailboxCap,
+        },
+        pricing: { currency: PRICING.currency, network: PRICING.network, usdPerMillionTokens: PRICING.usdPerMillionTokens },
+        totals: {
+          agents: agents.length,
+          freeUsedToday: agents.reduce((s, a) => s + a.freeUsedToday, 0),
+          creditsOutstanding: agents.reduce((s, a) => s + a.credits, 0),
+          owed: agents.reduce((s, a) => s + a.owed, 0),
+          mailboxBacklog: agents.reduce((s, a) => s + a.mailbox.count, 0),
+          payments: {
+            count: payments.length,
+            creditedCents: credited.reduce((s, p) => s + (p.cents ?? 0), 0),
+            creditedTokens: credited.reduce((s, p) => s + (p.tokens ?? 0), 0),
+            unmatched: unmatched.length,
+          },
+        },
+        agents: agents.sort((a, b) => (b.registeredAt ?? 0) - (a.registeredAt ?? 0)),
+        payments,
+      });
+    }
+
+    if (route === 'POST /v1/admin/agents/remove') {
+      // Destructive and operator-only: drops the registration, balance, and
+      // queued mail. Takes the exact TG- address (never a handle) so a typo
+      // can't wipe the wrong agent.
+      const denied = checkAdmin(req, 'admin_disabled');
+      if (denied) return send(res, 403, denied);
+      const raw = await readRaw(req);
+      const body = parseJson(raw);
+      if (!body) return send(res, 400, { error: 'bad_json' });
+      const { address } = body;
+      if (typeof address !== 'string' || !TG_ADDRESS_RE.test(address)) {
+        return send(res, 400, { error: 'bad_address', hint: 'exact TG- address required (handles are not accepted here)' });
+      }
+      const bill = store.getBilling(address);
+      const mailboxCount = store.loadMailbox(address).length;
+      const removed = store.removeAgent(address);
+      if (!removed) return send(res, 404, { error: 'unknown_agent' });
+      return send(res, 200, {
+        ok: true,
+        removed: { address: removed.address, handle: removed.handle },
+        droppedMailboxMessages: mailboxCount,
+        forfeited: { credits: bill.credits, owed: bill.owed ?? 0 },
+      });
+    }
+
     return send(res, 404, {
       error: 'no_such_route',
       routes: [
@@ -532,12 +680,25 @@ export function createServer({
         'POST /v1/messages',
         'GET /v1/inbox (signed)',
         'POST /v1/inbox/ack (signed)',
+        'GET /v1/sent (signed)',
         'GET /v1/credits (signed)',
+        'GET /owner (owner console UI)',
         'POST /v1/credits/grant (admin)',
         'POST /v1/credits/settle (admin)',
+        'GET /v1/admin/overview (admin)',
+        'POST /v1/admin/agents/remove (admin)',
+        'GET /dashboard (operator UI)',
         'POST /v1/webhooks/stripe (Stripe, when configured)',
       ],
     });
+  }
+
+  function checkAdmin(req, disabledError) {
+    if (!adminToken) return { error: disabledError, hint: 'relay has no admin token configured' };
+    if (!tokenMatches(req.headers['x-telegraph-admin'], adminToken)) {
+      return { error: 'bad_admin_token' };
+    }
+    return null;
   }
 
   function checkAuth(req, pathname, bodyHash) {
@@ -591,8 +752,11 @@ export function createServer({
       req.on('data', (c) => {
         size += c.length;
         if (size > LIMITS.bodyBytes) {
-          reject(new Error('body too large'));
-          req.destroy();
+          // pause, don't destroy: destroying here races the 413 out of the
+          // socket. Node closes the connection itself after the response
+          // since the body was never fully read.
+          req.pause();
+          reject(Object.assign(new Error(`body too large (max ${LIMITS.bodyBytes} bytes)`), { status: 413 }));
           return;
         }
         chunks.push(c);

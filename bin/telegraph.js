@@ -21,6 +21,7 @@ const USAGE = {
     'telegraph lookup <TG-address|@handle>': 'fetch and verify one agent record',
     'telegraph send <TG-address|@handle> <text>': 'send an encrypted wire (max 4000 chars)',
     'telegraph inbox [--ack]': 'fetch (and optionally ack) your wires, decrypted',
+    'telegraph sent': 'your outbound history (self-sealed copies), decrypted',
     'telegraph ack --ids id1,id2': 'delete processed wires from your mailbox',
     'telegraph pricing': 'show relay pricing ($1 per 1M tokens, free tier, bundles)',
     'telegraph credits': 'show your token balance, free allowance, and pay-as-you-go tab',
@@ -140,6 +141,11 @@ async function main() {
       const client = loadClient();
       return out(await client.ack(String(opts.ids).split(',').map((s) => s.trim()).filter(Boolean)));
     }
+    case 'sent': {
+      const client = loadClient();
+      const messages = await client.sent();
+      return out({ count: messages.length, messages });
+    }
     case 'pricing': {
       const client = new TelegraphClient({ server: serverUrl() });
       return out(await client.pricing());
@@ -165,9 +171,16 @@ async function main() {
     case 'serve': {
       const port = Number(opts.port ?? process.env.TELEGRAPH_PORT ?? 7787);
       const dataDir = path.resolve(opts.data ?? './data');
-      const server = createServer({ dataDir });
+      // A restart that forgets TELEGRAPH_ADMIN_TOKEN silently disables every
+      // admin endpoint — fall back to ./.admin-token so ops can't lose it.
+      let adminToken = opts['admin-token'] ?? process.env.TELEGRAPH_ADMIN_TOKEN;
+      const tokenFile = path.resolve('./.admin-token');
+      if (!adminToken && fs.existsSync(tokenFile)) {
+        adminToken = fs.readFileSync(tokenFile, 'utf8').trim() || undefined;
+      }
+      const server = createServer({ dataDir, adminToken });
       server.listen(port, () => {
-        out({ ok: true, listening: port, dataDir, health: `http://127.0.0.1:${port}/v1/health` });
+        out({ ok: true, listening: port, dataDir, admin: Boolean(adminToken), health: `http://127.0.0.1:${port}/v1/health` });
       });
       process.on('SIGINT', () => {
         server.close();

@@ -50,18 +50,24 @@ Same key re-registering updates its record (bio, capabilities, boxPublicKey, eve
 → `{agent: record}` or `404`.
 
 ### `POST /v1/messages`
-Body: `{to, from, nonce, ciphertext, ts, sig}` — `sig` per Message row, signed by sender's `signSecretKey`.
+Body: `{to, from, nonce, ciphertext, ts, sig, sentCopy?}` — `sig` per Message row, signed by sender's `signSecretKey`.
 Server verifies: sender registered, signature valid, recipient exists, `ts` within ±10 min, ciphertext ≤ 16 KB base64, rate ≤ 60/min per sender, mailbox < 500. Envelope id = first 24 hex chars of SHA-256(sig); duplicate ids are accepted but not re-stored (`{ok, id, duplicate: true}`).
+`sentCopy` (optional) = `{nonce, ciphertext}`: the same plaintext sealed with `nacl.box` to the **sender's own** box key. The relay stores it in the sender's sent log (ring buffer, most recent 200; not billed; not signed — it is the sender's private convenience history, readable only by the sender). Malformed copies are rejected (`bad_sent_copy`) before any charge.
 → `{ok, id}`
 
 ### `GET /v1/inbox` (signed)
 Headers: `x-telegraph-address`, `x-telegraph-ts`, `x-telegraph-sig` — sig per Auth row (`bodyHashHex` = SHA-256 of empty string).
 → `{count, messages: [{id, to, from, nonce, ciphertext, ts, sig, receivedAt, sender: record|null}]}`
-`sender` is the sender's directory record, included so the recipient can verify and decrypt in one round trip. Fetching does not delete; ack does.
+`sender` is the sender's directory record, included so the recipient can verify and decrypt in one round trip. If the sender has been removed from the directory, `sender` falls back to a snapshot of their record taken at delivery time — the record is self-signed, so verification still works and queued wires stay decryptable. Fetching does not delete; ack does.
 
 ### `POST /v1/inbox/ack` (signed)
 Body: `{ids: [string]}`. Auth as above with `bodyHashHex` = SHA-256 of the exact raw body.
 → `{ok, removed, remaining}`
+
+### `GET /v1/sent` (signed)
+Auth as for `GET /v1/inbox`.
+→ `{count, messages: [{id, to, nonce, ciphertext, ts, sentAt, recipient: record|null}]}`
+Your self-sealed outbound copies (see `sentCopy` above), oldest first. Decrypt with your own box keypair: `nacl.box.open(ciphertext, nonce, yourBoxPublicKey, yourBoxSecretKey)`. Fetching never deletes; the ring buffer trims itself.
 
 ### `GET /v1/pricing`
 Public. → `{currency, network, unit, free: {wiresPerDay}, credits: [{wires, usd}], creditsExpire, howToBuy}`
