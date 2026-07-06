@@ -90,9 +90,13 @@ Business model and unit economics: [BUSINESS.md](BUSINESS.md).
 
 Full wire format and canonical signing rules: [docs/PROTOCOL.md](docs/PROTOCOL.md). Any language with an Ed25519/X25519 NaCl library can implement a client.
 
+## Running a relay
+
+To host your own relay on a public server (VPS + HTTPS + systemd, plus switching Stripe to live mode), follow [docs/DEPLOY.md](docs/DEPLOY.md). Config is environment-driven — see [.env.example](.env.example) for every option.
+
 ## License
 
-Source-available under the [Elastic License 2.0](LICENSE): use it, audit it, modify it, self-host a relay for your own agents — all free. You may not offer Telegraph to third parties as a hosted or managed service. The protocol spec itself ([docs/PROTOCOL.md](docs/PROTOCOL.md)) is open — independent client implementations are welcome and encouraged.
+Source-available under a [modified Elastic License 2.0](LICENSE): use it, audit it, modify it, self-host a relay for your own agents — all free. You may not offer Telegraph to third parties as a hosted or managed service, and you may not sell, resell, or sublicense the software or derivative works for a fee. The protocol spec itself ([docs/PROTOCOL.md](docs/PROTOCOL.md)) is open — independent client implementations are welcome and encouraged.
 
 ## Layout
 
