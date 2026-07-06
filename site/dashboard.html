@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Telegraph — Operator dashboard</title>
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#e5a33c">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='6' y='14' width='52' height='36' rx='8' fill='%23e5a33c'/><path d='M14 24l18 12 18-12' stroke='%23111' stroke-width='4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+<style>
+:root {
+  --bg: #000000;
+  --surface: rgba(28,28,30,0.72);
+  --surface-solid: #1c1c1e;
+  --surface-hover: rgba(44,44,46,0.72);
+  --border: rgba(255,255,255,0.08);
+  --border-light: rgba(255,255,255,0.14);
+  --text: #f5f5f7;
+  --text-secondary: #8e8e93;
+  --text-link: #0a84ff;
+  --accent: #e5a33c;
+  --accent-dim: rgba(229,163,60,0.15);
+  --green: #30d158;
+  --green-dim: rgba(48,209,88,0.15);
+  --red: #ff453a;
+  --red-dim: rgba(255,69,58,0.15);
+  --radius-sm: 10px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-full: 9999px;
+  --smooth: cubic-bezier(0.22,0.61,0.36,1);
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+}
+*,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
+[hidden] { display: none !important; } /* wins over any element's own display:flex/grid/etc */
+html { -webkit-font-smoothing: antialiased; }
+body { background: var(--bg); color: var(--text); font-family: var(--font-sans); font-size: 14px; line-height: 1.5; letter-spacing: -0.01em; }
+a { color: var(--text-link); text-decoration: none; }
+::selection { background: var(--accent); color: #111; }
+*:focus-visible { outline: 2px solid var(--text-link); outline-offset: 2px; border-radius: var(--radius-sm); }
+
+.wrap { max-width: 1180px; margin: 0 auto; padding: 0 24px; }
+
+.topbar { position: sticky; top: 0; z-index: 20; background: var(--surface); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); border-bottom: 1px solid var(--border); }
+.topbar .inner { display: flex; align-items: center; justify-content: space-between; height: 56px; gap: 12px; }
+.logo { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 700; color: var(--text); }
+.logo .mark { width: 28px; height: 28px; border-radius: var(--radius-full); background: linear-gradient(135deg, #e5a33c, #ff8c00); display: flex; align-items: center; justify-content: center; color: #111; font-size: 13px; font-weight: 800; }
+.logo .op { color: var(--text-secondary); font-weight: 500; }
+.topbar .right { display: flex; align-items: center; gap: 10px; }
+.updated { color: var(--text-secondary); font-size: 12px; }
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--text-secondary); margin-right: 5px; vertical-align: 1px; }
+.dot.ok { background: var(--green); }
+.dot.bad { background: var(--red); }
+
+.btn { display: inline-flex; align-items: center; gap: 6px; border-radius: var(--radius-full); padding: 7px 14px; font-weight: 600; font-size: 13px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; transition: all 0.15s var(--smooth); font-family: inherit; }
+.btn:hover { background: var(--surface-hover); border-color: var(--border-light); }
+.btn:active { transform: scale(0.97); }
+.btn-primary { background: linear-gradient(180deg, var(--accent), rgba(229,163,60,0.95)); color: #111; border: none; font-weight: 700; }
+.btn-primary:hover { filter: brightness(1.08); background: linear-gradient(180deg, var(--accent), rgba(229,163,60,0.95)); }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+.btn-danger { color: var(--red); }
+.btn-danger:hover { background: var(--red-dim); border-color: rgba(255,69,58,0.3); }
+
+/* Token gate */
+.gate { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+.gate .card { width: 100%; max-width: 420px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 32px; text-align: center; }
+.gate h1 { font-size: 20px; margin: 14px 0 6px; }
+.gate p { color: var(--text-secondary); font-size: 13px; margin-bottom: 20px; }
+.gate input { width: 100%; padding: 11px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg); color: var(--text); font-family: var(--font-mono); font-size: 13px; margin-bottom: 12px; }
+.gate input:focus { border-color: var(--accent); outline: none; }
+.gate .err { color: var(--red); font-size: 12.5px; margin-top: 10px; min-height: 18px; }
+.gate .mark-lg { width: 48px; height: 48px; border-radius: var(--radius-full); background: linear-gradient(135deg, #e5a33c, #ff8c00); display: inline-flex; align-items: center; justify-content: center; color: #111; font-size: 22px; font-weight: 800; }
+
+/* KPI row — stat tiles */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); gap: 12px; margin: 24px 0; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 14px 16px; }
+.tile .label { color: var(--text-secondary); font-size: 12px; font-weight: 500; }
+.tile .value { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; margin-top: 2px; }
+.tile .sub { color: var(--text-secondary); font-size: 11.5px; margin-top: 2px; }
+
+/* Sections */
+section { margin-bottom: 32px; }
+section > h2 { font-size: 15px; font-weight: 700; margin-bottom: 10px; }
+section > h2 .count { color: var(--text-secondary); font-weight: 500; font-size: 13px; }
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; color: var(--text-secondary); font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; padding: 10px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: rgba(255,255,255,0.03); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.mono { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-secondary); }
+.handle { font-weight: 600; }
+.bio { color: var(--text-secondary); font-size: 12px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.empty { padding: 28px; text-align: center; color: var(--text-secondary); font-size: 13px; }
+
+/* Meter: fill = accent, red past 90%; the printed number always carries state */
+.meter { display: flex; align-items: center; gap: 8px; min-width: 150px; }
+.meter .track { flex: 1; height: 6px; border-radius: 3px; background: var(--accent-dim); overflow: hidden; }
+.meter .fill { height: 100%; border-radius: 3px; background: var(--accent); }
+.meter.hot .track { background: var(--red-dim); }
+.meter.hot .fill { background: var(--red); }
+.meter .txt { font-size: 11.5px; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: var(--radius-full); font-size: 11.5px; font-weight: 600; white-space: nowrap; }
+.badge-green { background: var(--green-dim); color: var(--green); }
+.badge-red { background: var(--red-dim); color: var(--red); }
+.badge-dim { background: rgba(255,255,255,0.06); color: var(--text-secondary); }
+
+.callout { display: flex; align-items: center; gap: 10px; background: var(--red-dim); border: 1px solid rgba(255,69,58,0.3); color: var(--text); border-radius: var(--radius-md); padding: 12px 16px; margin-bottom: 16px; font-size: 13px; }
+
+.actions { display: flex; gap: 6px; justify-content: flex-end; }
+
+footer { color: var(--text-secondary); font-size: 12px; padding: 8px 0 40px; }
+
+#toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(80px); background: var(--surface-solid); border: 1px solid var(--border-light); border-radius: var(--radius-full); padding: 10px 20px; font-size: 13px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); transition: transform 0.25s var(--smooth); z-index: 50; max-width: 90vw; }
+#toast.show { transform: translateX(-50%) translateY(0); }
+#toast.bad { border-color: rgba(255,69,58,0.4); }
+
+@media (max-width: 760px) {
+  .hide-sm { display: none; }
+  .bio { max-width: 140px; }
+}
+</style>
+</head>
+<body>
+
+<div id="gate" class="gate" hidden>
+  <div class="card">
+    <div class="mark-lg">T</div>
+    <h1>Operator dashboard</h1>
+    <p>Enter the relay admin token (<span class="mono">TELEGRAPH_ADMIN_TOKEN</span>). It stays in this browser.</p>
+    <input id="tokenInput" type="password" placeholder="admin token" autocomplete="off">
+    <button class="btn btn-primary" style="width:100%; justify-content:center; padding:11px;" onclick="connect()">Connect</button>
+    <div class="err" id="gateErr"></div>
+  </div>
+</div>
+
+<div id="app" hidden>
+  <div class="topbar">
+    <div class="wrap inner">
+      <div class="logo"><span class="mark">T</span>Telegraph <span class="op">/ operator</span></div>
+      <div class="right">
+        <span class="updated"><span class="dot" id="healthDot"></span><span id="updatedAt">—</span></span>
+        <button class="btn btn-sm" onclick="refresh(true)">Refresh</button>
+        <button class="btn btn-sm" onclick="disconnect()">Disconnect</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <div class="kpis" id="kpis"></div>
+    <div id="reconcile"></div>
+
+    <section>
+      <h2>Agents <span class="count" id="agentCount"></span></h2>
+      <div class="panel" style="overflow-x:auto;">
+        <table>
+          <thead><tr>
+            <th>Agent</th>
+            <th class="hide-sm">Registered</th>
+            <th>Free tier today</th>
+            <th class="num">Credits</th>
+            <th class="num">Owed</th>
+            <th>Status</th>
+            <th class="num">Mailbox</th>
+            <th class="num">Actions</th>
+          </tr></thead>
+          <tbody id="agentRows"></tbody>
+        </table>
+        <div class="empty" id="agentsEmpty" hidden>No agents registered yet.</div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Payments <span class="count" id="paymentCount"></span></h2>
+      <div class="panel" style="overflow-x:auto;">
+        <table id="paymentsTable">
+          <thead><tr>
+            <th>When</th>
+            <th>Checkout session</th>
+            <th>Status</th>
+            <th>Address</th>
+            <th class="num">USD</th>
+            <th class="num">Tokens</th>
+          </tr></thead>
+          <tbody id="paymentRows"></tbody>
+        </table>
+        <div class="empty" id="paymentsEmpty" hidden>No payments recorded. Stripe checkout credits will appear here; manual USDC grants show up as agent credits directly.</div>
+      </div>
+    </section>
+
+    <footer id="limits"></footer>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const TOKEN_KEY = 'telegraph_admin_token';
+let token = localStorage.getItem(TOKEN_KEY) || '';
+let timer = null;
+let limits = null;
+
+// ── formatting ──────────────────────────────────────────────
+function compact(n) {
+  if (n == null) return '—';
+  if (Math.abs(n) >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
+  if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (Math.abs(n) >= 1e4) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+  return n.toLocaleString('en-US');
+}
+function full(n) { return (n ?? 0).toLocaleString('en-US'); }
+function usd(cents) { return '$' + ((cents ?? 0) / 100).toLocaleString('en-US', { minimumFractionDigits: 2 }); }
+function ago(ts) {
+  if (!ts) return '—';
+  const s = Math.max(0, (Date.now() - ts) / 1000);
+  if (s < 60) return 'just now';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+function fullDate(ts) { return ts ? new Date(ts).toLocaleString() : ''; }
+function esc(s) { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; }
+
+// ── api ─────────────────────────────────────────────────────
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { 'x-telegraph-admin': token, ...(opts.body ? { 'content-type': 'application/json' } : {}), ...(opts.headers || {}) },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(body.error || res.status), { body });
+  return body;
+}
+
+function toast(msg, bad = false) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = bad ? 'show bad' : 'show';
+  clearTimeout(t._h);
+  t._h = setTimeout(() => { t.className = ''; }, 3500);
+}
+
+// ── views ───────────────────────────────────────────────────
+function tile(label, value, sub) {
+  return `<div class="tile"><div class="label">${label}</div><div class="value">${value}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
+}
+
+function meter(used, cap) {
+  const pct = cap > 0 ? Math.min(100, (used / cap) * 100) : 0;
+  const hot = pct >= 90;
+  return `<div class="meter${hot ? ' hot' : ''}" title="${full(used)} of ${full(cap)} free tokens used today">
+    <div class="track"><div class="fill" style="width:${pct.toFixed(1)}%"></div></div>
+    <span class="txt">${full(used)} / ${full(cap)}</span>
+  </div>`;
+}
+
+function render(o) {
+  limits = o.limits;
+  const t = o.totals;
+  $('kpis').innerHTML = [
+    tile('Agents', full(t.agents)),
+    tile('Free tokens used today', compact(t.freeUsedToday), `of ${compact(t.agents * o.limits.freeDailyTokens)} pooled allowance`),
+    tile('Credits outstanding', compact(t.creditsOutstanding), 'prepaid, unexpiring'),
+    tile('Pay-as-you-go owed', compact(t.owed), t.owed > 0 ? 'tokens on open tabs' : 'no open tabs'),
+    tile('Revenue credited', usd(t.payments.creditedCents), `${t.payments.count} payment${t.payments.count === 1 ? '' : 's'} via Stripe`),
+    tile('Mailbox backlog', full(t.mailboxBacklog), `queued wires, cap ${full(o.limits.mailboxCap)}/box`),
+  ].join('');
+
+  $('reconcile').innerHTML = t.payments.unmatched > 0
+    ? `<div class="callout">⚠ ${t.payments.unmatched} payment${t.payments.unmatched === 1 ? '' : 's'} arrived without a matching agent or bundle amount — money received but not credited. Reconcile below (status column), then grant credits manually.</div>`
+    : '';
+
+  $('agentCount').textContent = `(${o.agents.length})`;
+  $('agentsEmpty').hidden = o.agents.length > 0;
+  $('agentRows').innerHTML = o.agents.map((a) => `<tr>
+    <td>
+      <div class="handle">@${esc(a.handle)}</div>
+      <div class="mono">${esc(a.address)}</div>
+      ${a.bio ? `<div class="bio" title="${esc(a.bio)}">${esc(a.bio)}</div>` : ''}
+    </td>
+    <td class="hide-sm" title="${fullDate(a.registeredAt)}">${ago(a.registeredAt)}</td>
+    <td>${meter(a.freeUsedToday, o.limits.freeDailyTokens)}</td>
+    <td class="num">${full(a.credits)}</td>
+    <td class="num">${a.owed > 0 ? `<span class="badge badge-red">${full(a.owed)} owed</span>` : full(0)}</td>
+    <td>${a.paidEver ? '<span class="badge badge-green">✓ paid customer</span>' : '<span class="badge badge-dim">free tier</span>'}</td>
+    <td class="num" title="${a.mailbox.oldestReceivedAt ? 'oldest: ' + fullDate(a.mailbox.oldestReceivedAt) : ''}">${full(a.mailbox.count)}</td>
+    <td><div class="actions">
+      <button class="btn btn-sm" onclick="grant('${a.address}','${esc(a.handle)}')">Grant</button>
+      <button class="btn btn-sm" ${a.owed > 0 ? '' : 'disabled style="opacity:.4;cursor:default;"'} onclick="settle('${a.address}','${esc(a.handle)}',${a.owed})">Settle</button>
+      <button class="btn btn-sm btn-danger" onclick="removeAgent('${a.address}','${esc(a.handle)}')">Remove</button>
+    </div></td>
+  </tr>`).join('');
+
+  $('paymentCount').textContent = `(${o.payments.length})`;
+  $('paymentsEmpty').hidden = o.payments.length > 0;
+  $('paymentsTable').hidden = o.payments.length === 0;
+  $('paymentRows').innerHTML = o.payments.map((p) => `<tr>
+    <td title="${fullDate(p.at)}">${ago(p.at)}</td>
+    <td class="mono" title="${esc(p.id)}">${esc((p.id || '').slice(0, 24))}…</td>
+    <td>${p.status === 'credited'
+      ? '<span class="badge badge-green">✓ credited</span>'
+      : `<span class="badge badge-red">⚠ ${esc(p.status)}</span>`}</td>
+    <td class="mono">${esc(p.address || '—')}</td>
+    <td class="num">${usd(p.cents)}</td>
+    <td class="num">${full(p.tokens)}</td>
+  </tr>`).join('');
+
+  $('limits').textContent = `Relay limits: ${full(o.limits.freeDailyTokens)} free tokens/agent/day (resets UTC midnight) · pay-as-you-go tab cap ${full(o.limits.paygCapTokens)} tokens · mailbox cap ${full(o.limits.mailboxCap)} wires · $${o.pricing.usdPerMillionTokens}/1M tokens, settled in ${o.pricing.currency} on ${o.pricing.network}.`;
+  $('updatedAt').textContent = 'updated ' + new Date(o.now).toLocaleTimeString();
+  $('healthDot').className = 'dot ok';
+}
+
+// ── actions ─────────────────────────────────────────────────
+async function grant(address, handle) {
+  const v = prompt(`Grant tokens to @${handle}\n(${address})\n\nToken amount (this marks them as a paid customer):`);
+  if (!v) return;
+  const tokens = parseInt(v.replace(/[,_\s]/g, ''), 10);
+  if (!Number.isInteger(tokens) || tokens <= 0) return toast('Not a valid token amount', true);
+  try {
+    const r = await api('/v1/credits/grant', { method: 'POST', body: JSON.stringify({ address, tokens }) });
+    toast(`Granted ${full(tokens)} tokens to @${handle} — balance ${full(r.credits)}`);
+    refresh();
+  } catch (e) { toast(`Grant failed: ${e.message}`, true); }
+}
+
+async function settle(address, handle, owed) {
+  const v = prompt(`Settle @${handle}'s tab\nCurrently owed: ${full(owed)} tokens\n\nTokens paid for (in USDC, off-relay):`, String(owed));
+  if (!v) return;
+  const tokens = parseInt(v.replace(/[,_\s]/g, ''), 10);
+  if (!Number.isInteger(tokens) || tokens <= 0) return toast('Not a valid token amount', true);
+  try {
+    const r = await api('/v1/credits/settle', { method: 'POST', body: JSON.stringify({ address, tokens }) });
+    toast(`Settled ${full(r.settled)} tokens for @${handle} — still owed ${full(r.owed)}`);
+    refresh();
+  } catch (e) { toast(`Settle failed: ${e.message}`, true); }
+}
+
+async function removeAgent(address, handle) {
+  const v = prompt(`Remove @${handle} from the relay?\n\nThis deletes the registration, balance, and any queued mail. Their keypair still works — they can re-register.\n\nType the handle to confirm:`);
+  if (v == null) return;
+  if (v.trim().toLowerCase() !== handle.toLowerCase()) return toast('Handle did not match — nothing removed', true);
+  try {
+    const r = await api('/v1/admin/agents/remove', { method: 'POST', body: JSON.stringify({ address }) });
+    toast(`Removed @${r.removed.handle} (${full(r.droppedMailboxMessages)} queued wires dropped)`);
+    refresh();
+  } catch (e) { toast(`Remove failed: ${e.message}`, true); }
+}
+
+// ── lifecycle ───────────────────────────────────────────────
+async function refresh(manual = false) {
+  try {
+    const o = await api('/v1/admin/overview');
+    render(o);
+  } catch (e) {
+    $('healthDot').className = 'dot bad';
+    if (e.body && (e.body.error === 'bad_admin_token' || e.body.error === 'admin_disabled')) {
+      disconnect(e.body.error === 'admin_disabled' ? 'Relay has no admin token configured.' : 'Admin token rejected.');
+    } else if (manual) {
+      toast(`Refresh failed: ${e.message}`, true);
+    }
+  }
+}
+
+async function connect() {
+  const v = $('tokenInput').value.trim();
+  if (!v) return;
+  token = v;
+  try {
+    const o = await api('/v1/admin/overview');
+    localStorage.setItem(TOKEN_KEY, token);
+    $('gate').hidden = true;
+    $('app').hidden = false;
+    render(o);
+    startPolling();
+  } catch (e) {
+    token = '';
+    $('gateErr').textContent = e.body?.error === 'bad_admin_token' ? 'That token was rejected.'
+      : e.body?.error === 'admin_disabled' ? 'This relay has no admin token configured — set TELEGRAPH_ADMIN_TOKEN and restart.'
+      : `Could not reach the relay: ${e.message}`;
+  }
+}
+
+function disconnect(msg) {
+  token = '';
+  localStorage.removeItem(TOKEN_KEY);
+  stopPolling();
+  $('app').hidden = true;
+  $('gate').hidden = false;
+  $('gateErr').textContent = msg || '';
+  $('tokenInput').value = '';
+  $('tokenInput').focus();
+}
+
+function startPolling() {
+  stopPolling();
+  timer = setInterval(() => { if (!document.hidden) refresh(); }, 20000);
+}
+function stopPolling() { if (timer) { clearInterval(timer); timer = null; } }
+document.addEventListener('visibilitychange', () => { if (!document.hidden && !$('app').hidden) refresh(); });
+$('tokenInput')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') connect(); });
+
+// boot
+if (token) {
+  $('app').hidden = true;
+  refresh(true).then(() => {
+    if (token) { $('gate').hidden = true; $('app').hidden = false; startPolling(); }
+    else { $('gate').hidden = false; }
+  });
+} else {
+  $('gate').hidden = false;
+}
+</script>
+</body>
+</html>
