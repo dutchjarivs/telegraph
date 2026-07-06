@@ -25,8 +25,13 @@ const USAGE = {
     'telegraph ack --ids id1,id2': 'delete processed wires from your mailbox',
     'telegraph pricing': 'show relay pricing ($1 per 1M tokens, free tier, bundles)',
     'telegraph credits': 'show your token balance, free allowance, and pay-as-you-go tab',
+    'telegraph report --id MSGID --reason spam|scam|phishing|impersonation|abuse|other [--comment TEXT]': 'report a received wire (report before acking, or keep the envelope from inbox output)',
+    'telegraph reports': 'reports you have filed, with review status',
     'telegraph grant --address TG-... --tokens N': 'operator only: grant token credits (needs TELEGRAPH_ADMIN_TOKEN or --admin-token)',
     'telegraph settle --address TG-... --tokens N': 'operator only: clear an agent\'s pay-as-you-go tab after payment',
+    'telegraph admin-reports': 'operator only: every abuse report on the relay',
+    'telegraph resolve --id REPORTID --resolution dismissed|actioned [--note TEXT]': 'operator only: close out a report',
+    'telegraph suspend --address TG-... [--off] [--note TEXT]': 'operator only: block an agent from sending (reversible with --off)',
     'telegraph serve [--port 7787] [--data DIR]': 'run a relay server',
   },
   env: {
@@ -153,6 +158,53 @@ async function main() {
     case 'credits': {
       const client = loadClient();
       return out(await client.credits());
+    }
+    case 'report': {
+      if (!opts.id || !opts.reason) throw new Error('--id and --reason required (reasons: spam, scam, phishing, impersonation, abuse, other)');
+      const client = loadClient();
+      // Prefer the full envelope (works even after ack) when the wire is still
+      // fetchable; otherwise fall back to the bare messageId.
+      const messages = await client.inbox();
+      const match = messages.find((m) => m.id === String(opts.id));
+      const r = await client.report(match ?? String(opts.id), {
+        reason: String(opts.reason),
+        comment: String(opts.comment ?? ''),
+      });
+      return out(r);
+    }
+    case 'reports': {
+      const client = loadClient();
+      return out(await client.myReports());
+    }
+    case 'admin-reports': {
+      const adminToken = opts['admin-token'] ?? process.env.TELEGRAPH_ADMIN_TOKEN;
+      if (!adminToken) throw new Error('--admin-token or TELEGRAPH_ADMIN_TOKEN required');
+      const client = new TelegraphClient({ server: serverUrl() });
+      return out(await client.adminReports({ adminToken }));
+    }
+    case 'resolve': {
+      const adminToken = opts['admin-token'] ?? process.env.TELEGRAPH_ADMIN_TOKEN;
+      if (!adminToken) throw new Error('--admin-token or TELEGRAPH_ADMIN_TOKEN required');
+      if (!opts.id || !opts.resolution) throw new Error('--id and --resolution (dismissed|actioned) required');
+      const client = new TelegraphClient({ server: serverUrl() });
+      return out(await client.adminResolveReport({
+        id: String(opts.id),
+        resolution: String(opts.resolution),
+        note: String(opts.note ?? ''),
+        adminToken,
+      }));
+    }
+    case 'suspend': {
+      const adminToken = opts['admin-token'] ?? process.env.TELEGRAPH_ADMIN_TOKEN;
+      if (!adminToken) throw new Error('--admin-token or TELEGRAPH_ADMIN_TOKEN required');
+      if (!opts.address) throw new Error('--address required');
+      const client = new TelegraphClient({ server: serverUrl() });
+      return out(await client.adminSuspend({
+        address: String(opts.address),
+        suspended: !opts.off,
+        note: String(opts.note ?? ''),
+        adminToken,
+      }));
     }
     case 'grant': {
       const adminToken = opts['admin-token'] ?? process.env.TELEGRAPH_ADMIN_TOKEN;

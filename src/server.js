@@ -31,7 +31,16 @@ export const DEFAULT_LIMITS = {
   paygCapTokens: 250_000, // pay-as-you-go tab: tokens an agent may owe before settling
   bytesPerToken: 4, // token estimate: relay can't read plaintext, so ~4 ciphertext bytes ≈ 1 token
   sentLogCap: 200, // self-sealed sent copies kept per agent (ring buffer, not billed)
+  reportRate: { windowMs: 24 * 60 * 60_000, max: 20 }, // abuse reports per reporter per day
+  reportCommentChars: 500,
+  // Distinct reporters (non-dismissed reports) before an agent is publicly
+  // flagged in the directory. Reports need cryptographic evidence of a wire
+  // from the reported sender, so false-flagging requires the target to have
+  // actually wired every accuser.
+  flagThreshold: 3,
 };
+
+export const REPORT_REASONS = ['spam', 'scam', 'phishing', 'impersonation', 'abuse', 'other'];
 
 export const PRICING = {
   currency: 'USDC',
@@ -82,6 +91,36 @@ export function createServer({
   const store = new Storage(dataDir);
   const rateMap = new Map();
   const registerMap = new Map();
+  const reportMap = new Map();
+
+  // Standing: how an address looks to the moderation system. Flagging is
+  // derived from reports on every read (never stored), so dismissing a report
+  // clears the flag with no extra bookkeeping.
+  function reportStats(address) {
+    const all = store.listReports().filter((r) => r.reported === address);
+    const active = all.filter((r) => r.status !== 'dismissed');
+    const distinctReporters = new Set(active.map((r) => r.reporter)).size;
+    return {
+      total: all.length,
+      open: active.filter((r) => r.status === 'open').length,
+      distinctReporters,
+      flagged: distinctReporters >= LIMITS.flagThreshold,
+    };
+  }
+
+  // Public decoration: agents everywhere else see the record verbatim, plus
+  // warning fields when they apply. Extra fields never break record
+  // verification — signatures cover only the registration fields.
+  function decorateAgent(agent) {
+    if (!agent) return agent;
+    const out = { ...agent };
+    if (reportStats(agent.address).flagged) {
+      out.flagged = true;
+      out.flagWarning = 'multiple agents reported wires from this address as spam or scam — verify before trusting';
+    }
+    if (store.getModeration(agent.address).suspended) out.suspended = true;
+    return out;
+  }
   const siteFile = new URL('../site/index.html', import.meta.url);
   const dashboardFile = new URL('../site/dashboard.html', import.meta.url);
   const ownerFile = new URL('../site/owner.html', import.meta.url);
@@ -204,6 +243,7 @@ export function createServer({
           registrationRateLimit: `${LIMITS.registerRate.max} new identities per IP per ${Math.round(LIMITS.registerRate.windowMs / 60_000)} min; updating an existing registration is never throttled`,
           freeTier: `${LIMITS.freeDailyTokens} free tokens/day, resets at UTC midnight; receiving is always free`,
           payment: 'past the free tier: prepaid credits, or a pay-as-you-go tab that unlocks after your first paid top-up — see /v1/pricing',
+          abuse: `spam or scam wires: report them via POST /v1/reports (signed) with the wire's messageId (still in your mailbox) or its full envelope from your inbox, plus a reason (${REPORT_REASONS.join('|')}). Reports carry cryptographic proof the sender wired you. Agents reported by ${LIMITS.flagThreshold}+ distinct reporters are flagged in the directory; the operator can suspend senders. Directory records may carry "flagged" or "suspended" — check before trusting a stranger.`,
         },
         keySafety: 'Your secret keys never leave your machine and the relay never sees them. Losing them means losing the identity — store them like credentials.',
       });
@@ -278,13 +318,15 @@ export function createServer({
 
     if (route === 'GET /v1/directory') {
       const q = (url.searchParams.get('q') ?? '').toLowerCase();
-      let agents = store.listAgents();
+      // Suspended agents are delisted from discovery; direct lookup by address
+      // or handle still works (labelled), so correspondents can see why.
+      let agents = store.listAgents().filter((a) => !store.getModeration(a.address).suspended);
       if (q) {
         agents = agents.filter((a) =>
           [a.handle, a.bio, ...(a.capabilities ?? [])].join(' ').toLowerCase().includes(q),
         );
       }
-      return send(res, 200, { count: agents.length, agents });
+      return send(res, 200, { count: agents.length, agents: agents.map(decorateAgent) });
     }
 
     if (req.method === 'GET' && url.pathname.startsWith('/v1/agents/')) {
@@ -293,7 +335,7 @@ export function createServer({
         ? store.getAgent(key)
         : store.findByHandle(key.replace(/^@/, ''));
       if (!agent) return send(res, 404, { error: 'not_found' });
-      return send(res, 200, { agent });
+      return send(res, 200, { agent: decorateAgent(agent) });
     }
 
     if (route === 'POST /v1/messages') {
@@ -336,6 +378,12 @@ export function createServer({
       }
       const sender = store.getAgent(from);
       if (!sender) return send(res, 401, { error: 'unknown_sender', hint: 'register first: POST /v1/register' });
+      if (store.getModeration(from).suspended) {
+        return send(res, 403, {
+          error: 'sender_suspended',
+          hint: 'this address is suspended from sending after abuse reports — contact the relay operator to appeal; your inbox still works',
+        });
+      }
       const recipient = store.getAgent(to);
       if (!recipient) return send(res, 404, { error: 'unknown_recipient' });
       if (!verifyFields(messageFields(to, from, nonce, ciphertext, ts), sig, sender.signPublicKey)) {
@@ -428,7 +476,8 @@ export function createServer({
         ...m,
         // Live record first (fresh bio/handle), delivery-time snapshot as the
         // fallback so wires stay decryptable after the sender is removed.
-        sender: store.getAgent(m.from) ?? senderRecord ?? null,
+        // Decoration warns recipients when the sender has since been flagged.
+        sender: decorateAgent(store.getAgent(m.from)) ?? senderRecord ?? null,
       }));
       return send(res, 200, { count: messages.length, messages });
     }
@@ -477,6 +526,119 @@ export function createServer({
         paygUnlocked: !!bill.paidEver,
         paygRemaining: bill.paidEver ? Math.max(0, LIMITS.paygCapTokens - (bill.owed ?? 0)) : 0,
       });
+    }
+
+    if (route === 'POST /v1/reports') {
+      // Report a wire you received as spam/scam. The relay can't read wires,
+      // so moderation runs on receipts, not contents: every report must prove
+      // the reported sender actually wired the reporter. Two forms of proof —
+      //   messageId: the wire is still in your mailbox (relay verified it at delivery)
+      //   envelope:  the full signed envelope from GET /v1/inbox, re-verified here,
+      //              so you can still report after acking.
+      const raw = await readRaw(req);
+      const auth = checkAuth(req, url.pathname, sha256hex(raw));
+      if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
+      const body = parseJson(raw);
+      if (!body) return send(res, 400, { error: 'bad_json' });
+      const { messageId, envelope, reason, comment = '' } = body;
+      if (!REPORT_REASONS.includes(reason)) {
+        return send(res, 400, { error: 'bad_reason', hint: `reason must be one of: ${REPORT_REASONS.join(', ')}` });
+      }
+      if (typeof comment !== 'string' || comment.length > LIMITS.reportCommentChars) {
+        return send(res, 400, { error: 'bad_comment', hint: `optional string, max ${LIMITS.reportCommentChars} chars` });
+      }
+      let wire; // { id, from, ts }
+      let evidenceKind;
+      if (envelope !== undefined) {
+        const e = envelope;
+        if (
+          typeof e !== 'object' || e === null ||
+          typeof e.to !== 'string' || typeof e.from !== 'string' ||
+          typeof e.nonce !== 'string' || typeof e.ciphertext !== 'string' ||
+          typeof e.ts !== 'number' || typeof e.sig !== 'string'
+        ) {
+          return send(res, 400, { error: 'bad_envelope', hint: 'envelope is the wire as delivered: {to, from, nonce, ciphertext, ts, sig}' });
+        }
+        if (e.to !== auth.address) {
+          return send(res, 403, { error: 'not_your_wire', hint: 'you can only report wires addressed to you' });
+        }
+        const reported = store.getAgent(e.from);
+        if (!reported) {
+          return send(res, 404, { error: 'unknown_reported_agent', hint: 'the sender is no longer registered here — nothing to act on' });
+        }
+        if (!verifyFields(messageFields(e.to, e.from, e.nonce, e.ciphertext, e.ts), e.sig, reported.signPublicKey)) {
+          return send(res, 400, { error: 'bad_evidence', hint: "the envelope signature does not verify against the reported sender's key" });
+        }
+        wire = { id: crypto.createHash('sha256').update(e.sig).digest('hex').slice(0, 24), from: e.from, ts: e.ts };
+        evidenceKind = 'signature';
+      } else if (typeof messageId === 'string' && messageId) {
+        const m = store.loadMailbox(auth.address).find((x) => x.id === messageId);
+        if (!m) {
+          return send(res, 404, {
+            error: 'message_not_found',
+            hint: 'not in your mailbox (already acked?) — submit the full envelope {to, from, nonce, ciphertext, ts, sig} from your inbox instead',
+          });
+        }
+        wire = { id: m.id, from: m.from, ts: m.ts };
+        evidenceKind = 'mailbox';
+      } else {
+        return send(res, 400, {
+          error: 'missing_evidence',
+          hint: 'provide messageId (wire still in your mailbox) or envelope (the full signed wire from your inbox)',
+        });
+      }
+      if (wire.from === auth.address) {
+        return send(res, 400, { error: 'cannot_report_self' });
+      }
+      // One report per reporter per wire — replays are acknowledged, not recounted.
+      const reportId = crypto.createHash('sha256').update(`${auth.address}:${wire.id}`).digest('hex').slice(0, 24);
+      if (store.getReport(reportId)) {
+        const s = reportStats(wire.from);
+        return send(res, 200, { ok: true, reportId, duplicate: true, reported: wire.from, standing: { distinctReporters: s.distinctReporters, flagged: s.flagged } });
+      }
+      if (!allowHit(reportMap, auth.address, LIMITS.reportRate)) {
+        return send(res, 429, { error: 'report_rate_limited', hint: `max ${LIMITS.reportRate.max} reports per day` });
+      }
+      store.putReport(reportId, {
+        reporter: auth.address,
+        reported: wire.from,
+        messageId: wire.id,
+        reason,
+        comment,
+        evidence: evidenceKind,
+        msgTs: wire.ts,
+        at: Date.now(),
+        status: 'open',
+      });
+      const s = reportStats(wire.from);
+      return send(res, 200, {
+        ok: true,
+        reportId,
+        reported: wire.from,
+        standing: { distinctReporters: s.distinctReporters, flagged: s.flagged },
+        note: 'the relay operator reviews reports; agents reported by multiple distinct reporters are flagged in the directory',
+      });
+    }
+
+    if (route === 'GET /v1/reports/mine') {
+      const auth = checkAuth(req, url.pathname, sha256hex(''));
+      if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
+      const reports = store
+        .listReports()
+        .filter((r) => r.reporter === auth.address)
+        .sort((a, b) => (b.at ?? 0) - (a.at ?? 0))
+        .map((r) => ({
+          id: r.id,
+          reported: r.reported,
+          reportedHandle: store.getAgent(r.reported)?.handle ?? null,
+          reason: r.reason,
+          comment: r.comment,
+          evidence: r.evidence,
+          status: r.status,
+          at: r.at,
+          resolvedAt: r.resolvedAt ?? null,
+        }));
+      return send(res, 200, { count: reports.length, reports });
     }
 
     if (route === 'POST /v1/webhooks/stripe') {
@@ -595,6 +757,7 @@ export function createServer({
       const agents = store.listAgents().map((a) => {
         const bill = store.getBilling(a.address);
         const mailbox = store.loadMailbox(a.address);
+        const standing = reportStats(a.address);
         return {
           address: a.address,
           handle: a.handle,
@@ -606,12 +769,22 @@ export function createServer({
           freeUsedToday: bill.day === today ? bill.used : 0,
           owed: bill.owed ?? 0,
           paidEver: !!bill.paidEver,
+          suspended: store.getModeration(a.address).suspended,
+          reports: standing,
           mailbox: {
             count: mailbox.length,
             oldestReceivedAt: mailbox.length ? mailbox[0].receivedAt : null,
           },
         };
       });
+      const reports = store
+        .listReports()
+        .sort((a, b) => (b.at ?? 0) - (a.at ?? 0))
+        .map((r) => ({
+          ...r,
+          reporterHandle: store.getAgent(r.reporter)?.handle ?? null,
+          reportedHandle: store.getAgent(r.reported)?.handle ?? null,
+        }));
       const payments = store.listPayments().sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
       const credited = payments.filter((p) => p.status === 'credited');
       const unmatched = payments.filter((p) => p.status !== 'credited');
@@ -631,6 +804,12 @@ export function createServer({
           creditsOutstanding: agents.reduce((s, a) => s + a.credits, 0),
           owed: agents.reduce((s, a) => s + a.owed, 0),
           mailboxBacklog: agents.reduce((s, a) => s + a.mailbox.count, 0),
+          reports: {
+            total: reports.length,
+            open: reports.filter((r) => r.status === 'open').length,
+            flaggedAgents: agents.filter((a) => a.reports.flagged).length,
+            suspendedAgents: agents.filter((a) => a.suspended).length,
+          },
           payments: {
             count: payments.length,
             creditedCents: credited.reduce((s, p) => s + (p.cents ?? 0), 0),
@@ -639,6 +818,7 @@ export function createServer({
           },
         },
         agents: agents.sort((a, b) => (b.registeredAt ?? 0) - (a.registeredAt ?? 0)),
+        reports,
         payments,
       });
     }
@@ -668,6 +848,73 @@ export function createServer({
       });
     }
 
+    if (route === 'POST /v1/admin/agents/suspend') {
+      // Reversible enforcement: a suspended agent cannot send and is delisted
+      // from the directory, but keeps its registration, balance, and inbox.
+      // Prefer this over remove for abusers — suspension follows the keypair.
+      const denied = checkAdmin(req, 'admin_disabled');
+      if (denied) return send(res, 403, denied);
+      const raw = await readRaw(req);
+      const body = parseJson(raw);
+      if (!body) return send(res, 400, { error: 'bad_json' });
+      const { address, suspended, note = '' } = body;
+      if (typeof address !== 'string' || !TG_ADDRESS_RE.test(address)) {
+        return send(res, 400, { error: 'bad_address', hint: 'exact TG- address required (handles are not accepted here)' });
+      }
+      if (typeof suspended !== 'boolean') {
+        return send(res, 400, { error: 'bad_suspended', hint: 'suspended must be true or false' });
+      }
+      if (typeof note !== 'string' || note.length > LIMITS.reportCommentChars) {
+        return send(res, 400, { error: 'bad_note', hint: `optional string, max ${LIMITS.reportCommentChars} chars` });
+      }
+      const agent = store.getAgent(address);
+      if (!agent) return send(res, 404, { error: 'unknown_agent' });
+      store.setModeration(address, { suspended, note, at: Date.now() });
+      return send(res, 200, { ok: true, address, handle: agent.handle, suspended });
+    }
+
+    if (route === 'GET /v1/admin/reports') {
+      const denied = checkAdmin(req, 'admin_disabled');
+      if (denied) return send(res, 403, denied);
+      const reports = store
+        .listReports()
+        .sort((a, b) => (b.at ?? 0) - (a.at ?? 0))
+        .map((r) => ({
+          ...r,
+          reporterHandle: store.getAgent(r.reporter)?.handle ?? null,
+          reportedHandle: store.getAgent(r.reported)?.handle ?? null,
+          reportedStanding: reportStats(r.reported),
+          reportedSuspended: store.getModeration(r.reported).suspended,
+        }));
+      return send(res, 200, {
+        ok: true,
+        count: reports.length,
+        open: reports.filter((r) => r.status === 'open').length,
+        flagThreshold: LIMITS.flagThreshold,
+        reports,
+      });
+    }
+
+    if (route === 'POST /v1/admin/reports/resolve') {
+      const denied = checkAdmin(req, 'admin_disabled');
+      if (denied) return send(res, 403, denied);
+      const raw = await readRaw(req);
+      const body = parseJson(raw);
+      if (!body) return send(res, 400, { error: 'bad_json' });
+      const { id, resolution, note = '' } = body;
+      if (resolution !== 'dismissed' && resolution !== 'actioned') {
+        return send(res, 400, { error: 'bad_resolution', hint: "resolution must be 'dismissed' (report doesn't count) or 'actioned' (confirmed, still counts toward the flag)" });
+      }
+      if (typeof note !== 'string' || note.length > LIMITS.reportCommentChars) {
+        return send(res, 400, { error: 'bad_note', hint: `optional string, max ${LIMITS.reportCommentChars} chars` });
+      }
+      const report = typeof id === 'string' ? store.getReport(id) : null;
+      if (!report) return send(res, 404, { error: 'unknown_report' });
+      store.putReport(id, { ...report, status: resolution, resolutionNote: note, resolvedAt: Date.now() });
+      const s = reportStats(report.reported);
+      return send(res, 200, { ok: true, id, status: resolution, reported: report.reported, standing: s });
+    }
+
     return send(res, 404, {
       error: 'no_such_route',
       routes: [
@@ -682,11 +929,16 @@ export function createServer({
         'POST /v1/inbox/ack (signed)',
         'GET /v1/sent (signed)',
         'GET /v1/credits (signed)',
+        'POST /v1/reports (signed — report a received wire as spam/scam)',
+        'GET /v1/reports/mine (signed)',
         'GET /owner (owner console UI)',
         'POST /v1/credits/grant (admin)',
         'POST /v1/credits/settle (admin)',
         'GET /v1/admin/overview (admin)',
         'POST /v1/admin/agents/remove (admin)',
+        'POST /v1/admin/agents/suspend (admin)',
+        'GET /v1/admin/reports (admin)',
+        'POST /v1/admin/reports/resolve (admin)',
         'GET /dashboard (operator UI)',
         'POST /v1/webhooks/stripe (Stripe, when configured)',
       ],

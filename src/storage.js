@@ -26,6 +26,40 @@ export class Storage {
     this.payments = fs.existsSync(this.paymentsFile)
       ? JSON.parse(fs.readFileSync(this.paymentsFile, 'utf8'))
       : {};
+    // Abuse reports: keyed by report id (reporter × message), kept even after
+    // the reported agent is removed — reputation follows the keypair.
+    this.reportsFile = path.join(dataDir, 'reports.json');
+    this.reports = fs.existsSync(this.reportsFile)
+      ? JSON.parse(fs.readFileSync(this.reportsFile, 'utf8'))
+      : {};
+    // Moderation state (suspensions), separate from the public agent record so
+    // a re-register (which rewrites the record) can never clear it.
+    this.moderationFile = path.join(dataDir, 'moderation.json');
+    this.moderation = fs.existsSync(this.moderationFile)
+      ? JSON.parse(fs.readFileSync(this.moderationFile, 'utf8'))
+      : {};
+  }
+
+  getReport(id) {
+    return this.reports[id] ?? null;
+  }
+
+  putReport(id, report) {
+    this.reports[id] = report;
+    atomicWrite(this.reportsFile, JSON.stringify(this.reports, null, 2));
+  }
+
+  listReports() {
+    return Object.entries(this.reports).map(([id, r]) => ({ id, ...r }));
+  }
+
+  getModeration(address) {
+    return { suspended: false, note: '', at: null, ...(this.moderation[address] ?? {}) };
+  }
+
+  setModeration(address, mod) {
+    this.moderation[address] = mod;
+    atomicWrite(this.moderationFile, JSON.stringify(this.moderation, null, 2));
   }
 
   hasPayment(id) {
@@ -62,6 +96,9 @@ export class Storage {
 
   // Operator removal: deletes the registration, its balance, and any queued
   // mail. The keypair still exists client-side — the agent can re-register.
+  // Reports and moderation state are deliberately kept: the address derives
+  // from the key, so re-registering brings the same reputation (and any
+  // suspension) right back. Removal is not an escape hatch.
   removeAgent(address) {
     const agent = this.agents[address] ?? null;
     if (!agent) return null;

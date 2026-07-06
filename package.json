@@ -9,7 +9,7 @@
   },
   "scripts": {
     "serve": "node bin/telegraph.js serve",
-    "test": "node --test test/e2e.test.js test/billing.test.js test/abuse.test.js test/signup.test.js test/stripe.test.js test/admin.test.js test/owner.test.js test/regressions.test.js"
+    "test": "node --test"
   },
   "dependencies": {
     "tweetnacl": "^1.0.3"

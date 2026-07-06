@@ -118,6 +118,11 @@ export class TelegraphClient {
         receivedAt: m.receivedAt,
         text,
         verified,
+        // Sender flagged by the relay's abuse-report system — treat with care.
+        flagged: sender?.flagged === true,
+        // The raw signed wire. Keep it if you might report this sender later:
+        // it is the evidence POST /v1/reports accepts even after you ack.
+        envelope: { to: m.to, from: m.from, nonce: m.nonce, ciphertext: m.ciphertext, ts: m.ts, sig: m.sig },
       };
     });
     if (ack && messages.length) {
@@ -153,6 +158,28 @@ export class TelegraphClient {
     return this.#req('GET', '/v1/credits', null, { signed: true });
   }
 
+  // Report a received wire as spam/scam. `wire` is any of: an inbox message
+  // (as returned by inbox(), carrying .envelope), a raw envelope object
+  // {to, from, nonce, ciphertext, ts, sig}, or a messageId string (only works
+  // while the wire is still in your mailbox, i.e. before ack).
+  async report(wire, { reason, comment = '' } = {}) {
+    const body = { reason, comment };
+    if (typeof wire === 'string') {
+      body.messageId = wire;
+    } else if (wire && typeof wire === 'object') {
+      const e = wire.envelope ?? wire;
+      body.envelope = { to: e.to, from: e.from, nonce: e.nonce, ciphertext: e.ciphertext, ts: e.ts, sig: e.sig };
+    } else {
+      throw new Error('report(wire): pass an inbox message, an envelope, or a messageId string');
+    }
+    return this.#req('POST', '/v1/reports', body, { signed: true });
+  }
+
+  // Reports you have filed, newest first, with their review status.
+  async myReports() {
+    return this.#req('GET', '/v1/reports/mine', null, { signed: true });
+  }
+
   // Relay-operator action: grant prepaid token credits after a USDC payment.
   async adminGrant({ address, tokens, adminToken }) {
     return this.#adminPost('/v1/credits/grant', { address, tokens }, adminToken);
@@ -163,11 +190,32 @@ export class TelegraphClient {
     return this.#adminPost('/v1/credits/settle', { address, tokens }, adminToken);
   }
 
+  // Relay-operator action: every abuse report on the relay, newest first.
+  async adminReports({ adminToken }) {
+    return this.#adminReq('GET', '/v1/admin/reports', null, adminToken);
+  }
+
+  // Relay-operator action: close a report as 'dismissed' (doesn't count toward
+  // the directory flag) or 'actioned' (confirmed abuse, still counts).
+  async adminResolveReport({ id, resolution, note = '', adminToken }) {
+    return this.#adminPost('/v1/admin/reports/resolve', { id, resolution, note }, adminToken);
+  }
+
+  // Relay-operator action: reversibly block an agent from sending (and delist
+  // it from the directory). Pass suspended: false to lift it.
+  async adminSuspend({ address, suspended = true, note = '', adminToken }) {
+    return this.#adminPost('/v1/admin/agents/suspend', { address, suspended, note }, adminToken);
+  }
+
   async #adminPost(path, body, adminToken) {
+    return this.#adminReq('POST', path, body, adminToken);
+  }
+
+  async #adminReq(method, path, body, adminToken) {
     const res = await fetch(this.server + path, {
-      method: 'POST',
+      method,
       headers: { 'content-type': 'application/json', 'x-telegraph-admin': adminToken },
-      body: JSON.stringify(body),
+      body: body == null ? undefined : JSON.stringify(body),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {

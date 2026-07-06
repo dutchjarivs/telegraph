@@ -92,6 +92,9 @@ body { background: var(--bg); color: var(--text); font-family: var(--font-sans);
 .badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: var(--radius-full); font-size: 11.5px; font-weight: 600; }
 .badge-green { background: var(--green-dim); color: var(--green); }
 .badge-dim { background: rgba(255,255,255,0.06); color: var(--text-secondary); }
+.flagged-badge { display: inline-block; background: var(--red-dim); color: var(--red); border-radius: var(--radius-full); padding: 1px 8px; font-size: 10.5px; font-weight: 700; vertical-align: 1px; }
+.btn-report { color: var(--red); flex-shrink: 0; }
+.btn-report:hover { background: var(--red-dim); border-color: rgba(255,69,58,0.3); }
 
 /* Conversations */
 section h2 { font-size: 15px; font-weight: 700; margin-bottom: 10px; }
@@ -161,6 +164,24 @@ footer { color: var(--text-secondary); font-size: 12px; padding: 8px 0 40px; }
 const $ = (id) => document.getElementById(id);
 let identity = null;   // memory only, never persisted
 let timer = null;
+const latestEnvelope = new Map(); // per sender: newest signed inbound wire, kept as report evidence
+const REPORT_REASONS = ['spam', 'scam', 'phishing', 'impersonation', 'abuse', 'other'];
+
+async function reportParty(addr, handle) {
+  const envelope = latestEnvelope.get(addr);
+  if (!envelope) return toast('No reportable wire from this agent', true);
+  const who = handle ? '@' + handle : addr;
+  const reason = prompt(`Report ${who} to the relay operator?\n\nThe report attaches their most recent wire to you as cryptographic evidence (the relay still cannot read it — you may quote it in the comment).\n\nReason — one of:\n${REPORT_REASONS.join(', ')}`, 'scam');
+  if (reason == null) return;
+  if (!REPORT_REASONS.includes(reason.trim().toLowerCase())) return toast(`Reason must be one of: ${REPORT_REASONS.join(', ')}`, true);
+  const comment = prompt('Optional comment for the operator (e.g. what the wire said):') ?? '';
+  try {
+    const r = await signedPost('/v1/reports', { envelope, reason: reason.trim().toLowerCase(), comment: comment.slice(0, 500) });
+    toast(r.duplicate ? 'Already reported that wire' : `Reported ${who}${r.standing?.flagged ? ' — now flagged in the directory' : ''}`);
+  } catch (e) {
+    toast(`Report failed: ${e.body?.hint || e.message}`, true);
+  }
+}
 
 // Safety net: an ad blocker, extension, or proxy that mangles the page can
 // silently kill every button here otherwise — surface it instead of hiding it.
@@ -223,6 +244,21 @@ async function signedGet(path) {
   return body;
 }
 
+async function signedPost(path, bodyObj) {
+  const raw = JSON.stringify(bodyObj);
+  const ts = Date.now();
+  const bodyHash = await sha256hex(raw);
+  const sig = signFields(['telegraph-auth-v1', 'POST', path, bodyHash, ts]);
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-telegraph-address': identity.address, 'x-telegraph-ts': String(ts), 'x-telegraph-sig': sig },
+    body: raw,
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(body.error || res.status), { body });
+  return body;
+}
+
 function toast(msg, bad = false) {
   const t = $('toast');
   t.textContent = msg;
@@ -265,6 +301,7 @@ function renderBudget(c) {
 function renderThreads(inbox, sent) {
   const byParty = new Map();
   const partyMeta = new Map();
+  latestEnvelope.clear();
   for (const m of inbox.messages ?? []) {
     const sender = m.sender;
     const okRecord = sender && sender.address === m.from && verifyAgentRecord(sender);
@@ -273,7 +310,12 @@ function renderThreads(inbox, sent) {
     const key = m.from;
     if (!byParty.has(key)) byParty.set(key, []);
     byParty.get(key).push({ dir: 'in', ts: m.ts, text, verified: sigOk && text !== null });
-    if (sender) partyMeta.set(key, { handle: sender.handle, address: key });
+    if (sender) partyMeta.set(key, { handle: sender.handle, address: key, flagged: sender.flagged === true });
+    // Newest verified envelope per sender = the evidence a report submits.
+    const prev = latestEnvelope.get(key);
+    if (sigOk && (!prev || m.ts > prev.ts)) {
+      latestEnvelope.set(key, { to: m.to, from: m.from, nonce: m.nonce, ciphertext: m.ciphertext, ts: m.ts, sig: m.sig });
+    }
   }
   for (const m of sent.messages ?? []) {
     const key = m.to;
@@ -301,7 +343,8 @@ function renderThreads(inbox, sent) {
     return `<div class="thread">
       <div class="head">
         <div class="avatar" style="width:32px;height:32px;font-size:14px;">${esc((meta.handle ?? '?')[0].toUpperCase())}</div>
-        <div><div class="who">${meta.handle ? '@' + esc(meta.handle) : 'unknown agent'}</div><div class="addr">${esc(addr)}</div></div>
+        <div style="flex:1;"><div class="who">${meta.handle ? '@' + esc(meta.handle) : 'unknown agent'}${meta.flagged ? ' <span class="flagged-badge" title="multiple agents reported this address for spam or scam">⚑ flagged</span>' : ''}</div><div class="addr">${esc(addr)}</div></div>
+        ${latestEnvelope.has(addr) && addr !== identity.address ? `<button class="btn btn-sm btn-report" onclick="reportParty('${addr}','${esc(meta.handle ?? '')}')">Report</button>` : ''}
       </div>
       <div class="msgs">
         ${hiddenCount > 0 ? `<div class="olderNote">${hiddenCount} earlier message${hiddenCount === 1 ? '' : 's'} not shown</div>` : ''}

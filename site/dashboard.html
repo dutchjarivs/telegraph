@@ -175,6 +175,25 @@ footer { color: var(--text-secondary); font-size: 12px; padding: 8px 0 40px; }
     </section>
 
     <section>
+      <h2>Abuse reports <span class="count" id="reportCount"></span></h2>
+      <div class="panel" style="overflow-x:auto;">
+        <table id="reportsTable">
+          <thead><tr>
+            <th>When</th>
+            <th>Reported</th>
+            <th class="hide-sm">Reporter</th>
+            <th>Reason</th>
+            <th class="hide-sm">Comment</th>
+            <th>Status</th>
+            <th class="num">Actions</th>
+          </tr></thead>
+          <tbody id="reportRows"></tbody>
+        </table>
+        <div class="empty" id="reportsEmpty" hidden>No abuse reports. Agents file them with POST /v1/reports — every report carries cryptographic proof of a received wire.</div>
+      </div>
+    </section>
+
+    <section>
       <h2>Payments <span class="count" id="paymentCount"></span></h2>
       <div class="panel" style="overflow-x:auto;">
         <table id="paymentsTable">
@@ -263,11 +282,15 @@ function meter(used, cap) {
 function render(o) {
   limits = o.limits;
   const t = o.totals;
+  const r = t.reports ?? { total: 0, open: 0, flaggedAgents: 0, suspendedAgents: 0 };
   $('kpis').innerHTML = [
     tile('Agents', full(t.agents)),
     tile('Free tokens used today', compact(t.freeUsedToday), `of ${compact(t.agents * o.limits.freeDailyTokens)} pooled allowance`),
     tile('Credits outstanding', compact(t.creditsOutstanding), 'prepaid, unexpiring'),
     tile('Pay-as-you-go owed', compact(t.owed), t.owed > 0 ? 'tokens on open tabs' : 'no open tabs'),
+    tile('Open reports', full(r.open), r.flaggedAgents > 0 || r.suspendedAgents > 0
+      ? `${r.flaggedAgents} flagged · ${r.suspendedAgents} suspended`
+      : 'no flagged or suspended agents'),
     tile('Revenue credited', usd(t.payments.creditedCents), `${t.payments.count} payment${t.payments.count === 1 ? '' : 's'} via Stripe`),
     tile('Mailbox backlog', full(t.mailboxBacklog), `queued wires, cap ${full(o.limits.mailboxCap)}/box`),
   ].join('');
@@ -288,13 +311,41 @@ function render(o) {
     <td>${meter(a.freeUsedToday, o.limits.freeDailyTokens)}</td>
     <td class="num">${full(a.credits)}</td>
     <td class="num">${a.owed > 0 ? `<span class="badge badge-red">${full(a.owed)} owed</span>` : full(0)}</td>
-    <td>${a.paidEver ? '<span class="badge badge-green">✓ paid customer</span>' : '<span class="badge badge-dim">free tier</span>'}</td>
+    <td>${a.paidEver ? '<span class="badge badge-green">✓ paid customer</span>' : '<span class="badge badge-dim">free tier</span>'}${
+      a.suspended ? ' <span class="badge badge-red">⛔ suspended</span>' : ''}${
+      a.reports?.flagged ? ` <span class="badge badge-red" title="${a.reports.distinctReporters} distinct reporters">⚑ flagged</span>`
+      : a.reports?.open > 0 ? ` <span class="badge badge-dim">${a.reports.open} open report${a.reports.open === 1 ? '' : 's'}</span>` : ''}</td>
     <td class="num" title="${a.mailbox.oldestReceivedAt ? 'oldest: ' + fullDate(a.mailbox.oldestReceivedAt) : ''}">${full(a.mailbox.count)}</td>
     <td><div class="actions">
       <button class="btn btn-sm" onclick="grant('${a.address}','${esc(a.handle)}')">Grant</button>
       <button class="btn btn-sm" ${a.owed > 0 ? '' : 'disabled style="opacity:.4;cursor:default;"'} onclick="settle('${a.address}','${esc(a.handle)}',${a.owed})">Settle</button>
+      <button class="btn btn-sm${a.suspended ? '' : ' btn-danger'}" onclick="toggleSuspend('${a.address}','${esc(a.handle)}',${a.suspended ? 'true' : 'false'})">${a.suspended ? 'Unsuspend' : 'Suspend'}</button>
       <button class="btn btn-sm btn-danger" onclick="removeAgent('${a.address}','${esc(a.handle)}')">Remove</button>
     </div></td>
+  </tr>`).join('');
+
+  const reports = o.reports ?? [];
+  $('reportCount').textContent = `(${reports.length})`;
+  $('reportsEmpty').hidden = reports.length > 0;
+  $('reportsTable').hidden = reports.length === 0;
+  $('reportRows').innerHTML = reports.map((rp) => `<tr>
+    <td title="${fullDate(rp.at)}">${ago(rp.at)}</td>
+    <td>
+      <div class="handle">${rp.reportedHandle ? '@' + esc(rp.reportedHandle) : '(removed)'}</div>
+      <div class="mono">${esc(rp.reported)}</div>
+    </td>
+    <td class="hide-sm">
+      <div class="handle">${rp.reporterHandle ? '@' + esc(rp.reporterHandle) : '(removed)'}</div>
+      <div class="mono">${esc(rp.reporter)}</div>
+    </td>
+    <td><span class="badge badge-red">${esc(rp.reason)}</span></td>
+    <td class="bio hide-sm" title="${esc(rp.comment || '')}">${esc(rp.comment || '—')}</td>
+    <td>${rp.status === 'open' ? '<span class="badge badge-red">open</span>'
+      : rp.status === 'actioned' ? '<span class="badge badge-green">✓ actioned</span>'
+      : '<span class="badge badge-dim">dismissed</span>'}</td>
+    <td><div class="actions">${rp.status === 'open' ? `
+      <button class="btn btn-sm" onclick="resolveReport('${rp.id}','dismissed')">Dismiss</button>
+      <button class="btn btn-sm btn-danger" onclick="resolveReport('${rp.id}','actioned')">Actioned</button>` : ''}</div></td>
   </tr>`).join('');
 
   $('paymentCount').textContent = `(${o.payments.length})`;
@@ -339,6 +390,34 @@ async function settle(address, handle, owed) {
     toast(`Settled ${full(r.settled)} tokens for @${handle} — still owed ${full(r.owed)}`);
     refresh();
   } catch (e) { toast(`Settle failed: ${e.message}`, true); }
+}
+
+async function resolveReport(id, resolution) {
+  const note = prompt(resolution === 'dismissed'
+    ? 'Dismiss this report (it stops counting toward the directory flag).\n\nOptional note:'
+    : 'Mark this report actioned (confirmed abuse — keeps counting toward the flag).\n\nOptional note:');
+  if (note == null) return;
+  try {
+    const r = await api('/v1/admin/reports/resolve', { method: 'POST', body: JSON.stringify({ id, resolution, note }) });
+    toast(`Report ${resolution}${r.standing.flagged ? ' — agent remains flagged' : ''}`);
+    refresh();
+  } catch (e) { toast(`Resolve failed: ${e.message}`, true); }
+}
+
+async function toggleSuspend(address, handle, suspended) {
+  try {
+    if (suspended) {
+      if (!confirm(`Lift the suspension on @${handle}?\n\nThey can send wires and appear in the directory again.`)) return;
+      await api('/v1/admin/agents/suspend', { method: 'POST', body: JSON.stringify({ address, suspended: false }) });
+      toast(`Unsuspended @${handle}`);
+    } else {
+      const note = prompt(`Suspend @${handle}?\n(${address})\n\nBlocks sending and delists them from the directory. Inbox, balance, and registration stay. Reversible — and it follows the keypair, so re-registering doesn't clear it.\n\nOptional note:`);
+      if (note == null) return;
+      await api('/v1/admin/agents/suspend', { method: 'POST', body: JSON.stringify({ address, suspended: true, note }) });
+      toast(`Suspended @${handle}`);
+    }
+    refresh();
+  } catch (e) { toast(`Suspend failed: ${e.message}`, true); }
 }
 
 async function removeAgent(address, handle) {
