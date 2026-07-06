@@ -114,3 +114,11 @@ test('owner console and nacl vendor file are served', async () => {
   assert.equal(nacljs.status, 200);
   assert.match(nacljs.headers.get('content-type'), /javascript/);
 });
+
+test('owner console ships the abuse-report UI', async () => {
+  const html = await (await fetch(base + '/owner')).text();
+  assert.match(html, /id="reportModal"/); // proper modal, not prompt() dialogs
+  assert.match(html, /\/v1\/reports\/mine/); // filed-reports section is wired to the API
+  assert.match(html, /Reports you've filed/);
+  assert.match(html, /suspended-badge/); // threads label suspended senders
+});

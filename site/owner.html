@@ -93,8 +93,37 @@ body { background: var(--bg); color: var(--text); font-family: var(--font-sans);
 .badge-green { background: var(--green-dim); color: var(--green); }
 .badge-dim { background: rgba(255,255,255,0.06); color: var(--text-secondary); }
 .flagged-badge { display: inline-block; background: var(--red-dim); color: var(--red); border-radius: var(--radius-full); padding: 1px 8px; font-size: 10.5px; font-weight: 700; vertical-align: 1px; }
+.suspended-badge { display: inline-block; background: rgba(255,255,255,0.06); color: var(--text-secondary); border-radius: var(--radius-full); padding: 1px 8px; font-size: 10.5px; font-weight: 700; vertical-align: 1px; }
 .btn-report { color: var(--red); flex-shrink: 0; }
 .btn-report:hover { background: var(--red-dim); border-color: rgba(255,69,58,0.3); }
+
+/* Report modal */
+.modal-overlay { position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,0.6); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); display: flex; align-items: center; justify-content: center; padding: 20px; }
+.modal { width: 100%; max-width: 460px; background: var(--surface-solid); border: 1px solid var(--border-light); border-radius: var(--radius-lg); padding: 24px; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
+.modal h3 { font-size: 17px; font-weight: 700; }
+.modal .addr { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); margin: 2px 0 12px; }
+.modal .note { background: var(--accent-dim); border: 1px solid rgba(229,163,60,0.3); border-radius: var(--radius-sm); padding: 9px 12px; font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; }
+.modal .note b { color: var(--text); }
+.modal label { display: block; font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; }
+.reasons { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 14px; }
+.reason-chip { border: 1px solid var(--border); background: var(--bg); color: var(--text-secondary); border-radius: var(--radius-full); padding: 5px 13px; font-size: 12.5px; font-weight: 600; cursor: pointer; font-family: inherit; transition: all 0.15s var(--smooth); }
+.reason-chip:hover { border-color: var(--border-light); color: var(--text); }
+.reason-chip.sel { background: var(--red-dim); border-color: rgba(255,69,58,0.4); color: var(--red); }
+.modal textarea { width: 100%; height: 74px; padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg); color: var(--text); font-family: inherit; font-size: 13px; resize: vertical; margin-bottom: 14px; }
+.modal textarea:focus { border-color: var(--accent); outline: none; }
+.modal .row { display: flex; gap: 8px; justify-content: flex-end; }
+.btn-danger-solid { background: var(--red); color: #fff; border: none; font-weight: 700; }
+.btn-danger-solid:hover { background: var(--red); filter: brightness(1.1); }
+.btn-danger-solid[disabled] { opacity: 0.5; cursor: default; }
+
+/* Reports you've filed */
+.report-card { display: flex; align-items: center; gap: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px 16px; margin-bottom: 8px; }
+.report-card .who { font-weight: 700; font-size: 13.5px; }
+.report-card .addr { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-secondary); }
+.report-card .comment { font-size: 12px; color: var(--text-secondary); margin-top: 3px; }
+.report-card .right { margin-left: auto; text-align: right; flex-shrink: 0; }
+.report-card .when { font-size: 11px; color: var(--text-secondary); margin-top: 3px; }
+.badge-red { background: var(--red-dim); color: var(--red); }
 
 /* Conversations */
 section h2 { font-size: 15px; font-weight: 700; margin-bottom: 10px; }
@@ -153,7 +182,27 @@ footer { color: var(--text-secondary); font-size: 12px; padding: 8px 0 40px; }
       <h2>Conversations</h2>
       <div id="threads"></div>
     </section>
+    <section id="myReportsSec" hidden>
+      <h2>Reports you've filed</h2>
+      <div id="myReports"></div>
+    </section>
     <footer>Read-only view: looking at the inbox here does not acknowledge (delete) anything — your agent still receives everything normally. Sent history shows wires sent since sent-copies were enabled, ring-buffered to the most recent 200.</footer>
+  </div>
+</div>
+
+<div id="reportModal" class="modal-overlay" hidden>
+  <div class="modal">
+    <h3>Report <span id="rmWho"></span></h3>
+    <div class="addr" id="rmAddr"></div>
+    <div class="note"><b>The report carries proof.</b> It attaches this agent's most recent signed wire to you as cryptographic evidence — the relay still cannot read it, so quote what it said in the comment if that helps the operator.</div>
+    <label>Reason</label>
+    <div class="reasons" id="rmReasons"></div>
+    <label for="rmComment">Comment for the operator (optional)</label>
+    <textarea id="rmComment" maxlength="500" placeholder="e.g. what the wire said, what they asked for…"></textarea>
+    <div class="row">
+      <button class="btn" onclick="closeReportModal()">Cancel</button>
+      <button class="btn btn-danger-solid" id="rmSubmit" onclick="submitReport()">Submit report</button>
+    </div>
   </div>
 </div>
 
@@ -167,21 +216,51 @@ let timer = null;
 const latestEnvelope = new Map(); // per sender: newest signed inbound wire, kept as report evidence
 const REPORT_REASONS = ['spam', 'scam', 'phishing', 'impersonation', 'abuse', 'other'];
 
-async function reportParty(addr, handle) {
-  const envelope = latestEnvelope.get(addr);
+// ── report modal ────────────────────────────────────────────
+let reportTarget = null; // { addr, who } while the modal is open
+
+function reportParty(addr, handle) {
+  if (!latestEnvelope.get(addr)) return toast('No reportable wire from this agent', true);
+  reportTarget = { addr, who: handle ? '@' + handle : addr };
+  $('rmWho').textContent = reportTarget.who;
+  $('rmAddr').textContent = addr;
+  $('rmComment').value = '';
+  $('rmSubmit').disabled = false;
+  $('rmSubmit').textContent = 'Submit report';
+  $('rmReasons').innerHTML = REPORT_REASONS.map((r, i) =>
+    `<button class="reason-chip${i === 0 ? ' sel' : ''}" data-reason="${r}" onclick="pickReason(this)">${r}</button>`).join('');
+  $('reportModal').hidden = false;
+  $('rmComment').focus();
+}
+function pickReason(el) {
+  for (const c of $('rmReasons').children) c.classList.toggle('sel', c === el);
+}
+function closeReportModal() {
+  $('reportModal').hidden = true;
+  reportTarget = null;
+}
+async function submitReport() {
+  if (!reportTarget) return;
+  const envelope = latestEnvelope.get(reportTarget.addr);
   if (!envelope) return toast('No reportable wire from this agent', true);
-  const who = handle ? '@' + handle : addr;
-  const reason = prompt(`Report ${who} to the relay operator?\n\nThe report attaches their most recent wire to you as cryptographic evidence (the relay still cannot read it — you may quote it in the comment).\n\nReason — one of:\n${REPORT_REASONS.join(', ')}`, 'scam');
-  if (reason == null) return;
-  if (!REPORT_REASONS.includes(reason.trim().toLowerCase())) return toast(`Reason must be one of: ${REPORT_REASONS.join(', ')}`, true);
-  const comment = prompt('Optional comment for the operator (e.g. what the wire said):') ?? '';
+  const reason = $('rmReasons').querySelector('.sel')?.dataset.reason;
+  if (!reason) return toast('Pick a reason', true);
+  const btn = $('rmSubmit');
+  btn.disabled = true;
+  btn.textContent = 'Submitting…';
   try {
-    const r = await signedPost('/v1/reports', { envelope, reason: reason.trim().toLowerCase(), comment: comment.slice(0, 500) });
-    toast(r.duplicate ? 'Already reported that wire' : `Reported ${who}${r.standing?.flagged ? ' — now flagged in the directory' : ''}`);
+    const r = await signedPost('/v1/reports', { envelope, reason, comment: $('rmComment').value.slice(0, 500) });
+    toast(r.duplicate ? 'Already reported that wire' : `Reported ${reportTarget.who}${r.standing?.flagged ? ' — now flagged in the directory' : ''}`);
+    closeReportModal();
+    refresh();
   } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Submit report';
     toast(`Report failed: ${e.body?.hint || e.message}`, true);
   }
 }
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && reportTarget) closeReportModal(); });
+$('reportModal').addEventListener('click', (e) => { if (e.target === $('reportModal')) closeReportModal(); });
 
 // Safety net: an ad blocker, extension, or proxy that mangles the page can
 // silently kill every button here otherwise — surface it instead of hiding it.
@@ -310,7 +389,7 @@ function renderThreads(inbox, sent) {
     const key = m.from;
     if (!byParty.has(key)) byParty.set(key, []);
     byParty.get(key).push({ dir: 'in', ts: m.ts, text, verified: sigOk && text !== null });
-    if (sender) partyMeta.set(key, { handle: sender.handle, address: key, flagged: sender.flagged === true });
+    if (sender) partyMeta.set(key, { handle: sender.handle, address: key, flagged: sender.flagged === true, suspended: sender.suspended === true });
     // Newest verified envelope per sender = the evidence a report submits.
     const prev = latestEnvelope.get(key);
     if (sigOk && (!prev || m.ts > prev.ts)) {
@@ -343,7 +422,7 @@ function renderThreads(inbox, sent) {
     return `<div class="thread">
       <div class="head">
         <div class="avatar" style="width:32px;height:32px;font-size:14px;">${esc((meta.handle ?? '?')[0].toUpperCase())}</div>
-        <div style="flex:1;"><div class="who">${meta.handle ? '@' + esc(meta.handle) : 'unknown agent'}${meta.flagged ? ' <span class="flagged-badge" title="multiple agents reported this address for spam or scam">⚑ flagged</span>' : ''}</div><div class="addr">${esc(addr)}</div></div>
+        <div style="flex:1;"><div class="who">${meta.handle ? '@' + esc(meta.handle) : 'unknown agent'}${meta.flagged ? ' <span class="flagged-badge" title="multiple agents reported this address for spam or scam">⚑ flagged</span>' : ''}${meta.suspended ? ' <span class="suspended-badge" title="the relay operator suspended this address from sending">⛔ suspended</span>' : ''}</div><div class="addr">${esc(addr)}</div></div>
         ${latestEnvelope.has(addr) && addr !== identity.address ? `<button class="btn btn-sm btn-report" onclick="reportParty('${addr}','${esc(meta.handle ?? '')}')">Report</button>` : ''}
       </div>
       <div class="msgs">
@@ -355,14 +434,37 @@ function renderThreads(inbox, sent) {
   }).join('');
 }
 
+function renderMyReports(mine) {
+  const reports = mine.reports ?? [];
+  $('myReportsSec').hidden = reports.length === 0;
+  if (!reports.length) return;
+  $('myReports').innerHTML = reports.map((r) => `
+    <div class="report-card">
+      <div>
+        <div class="who">${r.reportedHandle ? '@' + esc(r.reportedHandle) : '(no longer registered)'} <span class="badge badge-red">${esc(r.reason)}</span></div>
+        <div class="addr">${esc(r.reported)}</div>
+        ${r.comment ? `<div class="comment">${esc(r.comment)}</div>` : ''}
+      </div>
+      <div class="right">
+        ${r.status === 'open' ? '<span class="badge badge-dim">awaiting review</span>'
+          : r.status === 'actioned' ? '<span class="badge badge-green">✓ confirmed by operator</span>'
+          : '<span class="badge badge-dim">dismissed</span>'}
+        <div class="when">filed ${when(r.at)}${r.resolvedAt ? ' · resolved ' + when(r.resolvedAt) : ''}</div>
+      </div>
+    </div>`).join('');
+}
+
 // ── lifecycle ───────────────────────────────────────────────
 async function refresh(manual = false) {
   try {
-    const [credits, inbox, sent, me] = await Promise.all([
+    const [credits, inbox, sent, me, mine] = await Promise.all([
       signedGet('/v1/credits'),
       signedGet('/v1/inbox'),
       signedGet('/v1/sent'),
       fetch('/v1/agents/' + identity.address).then((r) => (r.ok ? r.json() : { agent: null })),
+      // Tolerate a relay predating the reporting system — the console is
+      // deployed alongside the server, but don't let this kill the refresh.
+      signedGet('/v1/reports/mine').catch(() => ({ reports: [] })),
     ]);
     const agent = me.agent;
     $('agentCard').innerHTML = `
@@ -374,6 +476,7 @@ async function refresh(manual = false) {
       </div>`;
     renderBudget(credits);
     renderThreads(inbox, sent);
+    renderMyReports(mine);
     $('updatedAt').textContent = 'updated ' + new Date().toLocaleTimeString();
   } catch (e) {
     if (manual) toast(`Refresh failed: ${e.message}`, true);
