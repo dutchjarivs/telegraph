@@ -5,173 +5,226 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Telegraph — Owner console</title>
 <meta name="robots" content="noindex">
-<meta name="theme-color" content="#e5a33c">
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='6' y='14' width='52' height='36' rx='8' fill='%23e5a33c'/><path d='M14 24l18 12 18-12' stroke='%23111' stroke-width='4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+<meta name="theme-color" content="#f2ead8">
+<script>/* set before first paint — no light flash for dark-mode readers */
+try { if (localStorage.getItem('tg_theme') === 'dark') document.documentElement.dataset.theme = 'dark'; } catch {}</script>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='6' fill='%23f2ead8' stroke='%23262014' stroke-width='4'/><rect x='12' y='20' width='40' height='26' fill='none' stroke='%23262014' stroke-width='4'/><path d='M14 22l18 12 18-12' stroke='%23b97d10' stroke-width='4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
 <script src="/vendor/nacl-fast.min.js"></script>
 <style>
+/* ═══ TELEGRAPH BRAND — the 1899 wire office, same system as the landing page.
+   Paper, ink, brass. Telegram monospace for display, serif for reading.
+   Hard letterpress shadows, ruled lines. No gradients, no glassmorphism. */
 :root {
-  --bg: #000000;
-  --surface: rgba(28,28,30,0.72);
-  --surface-solid: #1c1c1e;
-  --surface-hover: rgba(44,44,46,0.72);
-  --border: rgba(255,255,255,0.08);
-  --border-light: rgba(255,255,255,0.14);
-  --text: #f5f5f7;
-  --text-secondary: #8e8e93;
-  --accent: #e5a33c;
-  --accent-dim: rgba(229,163,60,0.15);
-  --green: #30d158;
-  --green-dim: rgba(48,209,88,0.15);
-  --red: #ff453a;
-  --red-dim: rgba(255,69,58,0.15);
-  --radius-sm: 10px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
-  --radius-full: 9999px;
-  --smooth: cubic-bezier(0.22,0.61,0.36,1);
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-mono: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+  --paper: #f2ead8;          /* telegram blank */
+  --paper-bright: #faf5e8;   /* card stock */
+  --paper-deep: #e7dcc2;     /* aged edge */
+  --ink: #262014;            /* iron gall ink */
+  --ink-soft: #6b5f49;       /* faded ink */
+  --rule: #c4b494;           /* ledger rule */
+  --amber: #a06c07;          /* brass, text-safe on paper */
+  --amber-fill: #e5a33c;     /* brass, polished — fills only */
+  --wax: #9c3222;            /* sealing wax */
+  --wire-night: #211a10;     /* the wire room after dark */
+  --wire-text: #f0e6cd;
+  --ok: #3e6b34;
+  --line: #262014;           /* structural lines — tracks ink in light mode */
+  --press: #262014;          /* letterpress shadow */
+  --on-amber: #262014;       /* text on brass fills — constant in both modes */
+  --on-wax: #faf5e8;         /* text on sealing wax — constant in both modes */
+  --shadow: rgba(38,32,20,0.85);
+  --grain: rgba(38,32,20,0.045);
+  --font-wire: "Courier New", Courier, "Cascadia Mono", monospace; /* the telegram key */
+  --font-read: Georgia, "Times New Roman", "Iowan Old Style", serif; /* the newspaper */
+}
+/* night shift at the wire office: same paper physics, lamplight palette */
+html[data-theme="dark"] {
+  --paper: #171310;
+  --paper-bright: #211c15;
+  --paper-deep: #2d261c;
+  --ink: #ece1c6;
+  --ink-soft: #a89a7d;
+  --rule: #4a4132;
+  --amber: #e0a53f;
+  --wax: #d05a48;
+  --wire-night: #100d09;
+  --wire-text: #ece1c6;
+  --ok: #7fb571;
+  --line: #ece1c6;           /* cream outlines — print-on-dark */
+  --press: #ece1c6;
+  --shadow: rgba(0,0,0,0.9);
+  --grain: rgba(236,225,198,0.05);
 }
 *,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
 [hidden] { display: none !important; } /* wins over any element's own display:flex/grid/etc — the bug this fixes */
-html { -webkit-font-smoothing: antialiased; }
-body { background: var(--bg); color: var(--text); font-family: var(--font-sans); font-size: 14px; line-height: 1.5; letter-spacing: -0.01em; }
-::selection { background: var(--accent); color: #111; }
-*:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
+body {
+  background: var(--paper); color: var(--ink);
+  font-family: var(--font-read); font-size: 15px; line-height: 1.55;
+  /* faint paper grain */
+  background-image: radial-gradient(var(--grain) 1px, transparent 1px);
+  background-size: 22px 22px;
+  transition: background-color 0.25s, color 0.25s;
+}
+::selection { background: var(--amber-fill); color: var(--on-amber); }
+*:focus-visible { outline: 3px solid var(--wax); outline-offset: 2px; }
+code { font-family: var(--font-wire); }
 
-.wrap { max-width: 880px; margin: 0 auto; padding: 0 20px; }
+.wrap { max-width: 900px; margin: 0 auto; padding: 0 20px; }
 
-.topbar { position: sticky; top: 0; z-index: 20; background: var(--surface); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); border-bottom: 1px solid var(--border); }
-.topbar .inner { display: flex; align-items: center; justify-content: space-between; height: 56px; gap: 12px; }
-.logo { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 700; }
-.logo .mark { width: 28px; height: 28px; border-radius: var(--radius-full); background: linear-gradient(135deg, #e5a33c, #ff8c00); display: flex; align-items: center; justify-content: center; color: #111; font-size: 13px; font-weight: 800; }
-.logo .op { color: var(--text-secondary); font-weight: 500; }
-.topbar .right { display: flex; align-items: center; gap: 10px; }
-.updated { color: var(--text-secondary); font-size: 12px; }
+/* ═══ MASTHEAD ═══ */
+.topbar { background: var(--paper); border-bottom: 3px double var(--line); position: sticky; top: 0; z-index: 20; }
+.topbar .inner { display: flex; align-items: center; justify-content: space-between; height: 58px; gap: 10px; }
+.logo { display: flex; align-items: center; gap: 10px; font-family: var(--font-wire); font-weight: 700; font-size: 16px; letter-spacing: 0.14em; }
+.logo .mark { width: 30px; height: 30px; flex-shrink: 0; border: 2.5px solid var(--line); background: var(--amber-fill); display: flex; align-items: center; justify-content: center; color: var(--on-amber); font-size: 12px; letter-spacing: 0; box-shadow: 2px 2px 0 var(--press); }
+.logo .op { color: var(--ink-soft); }
+.topbar .right { display: flex; align-items: center; gap: 8px; }
+.updated { font-family: var(--font-wire); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
 
-.btn { display: inline-flex; align-items: center; gap: 6px; border-radius: var(--radius-full); padding: 7px 14px; font-weight: 600; font-size: 13px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; transition: all 0.15s var(--smooth); font-family: inherit; }
-.btn:hover { background: var(--surface-hover); border-color: var(--border-light); }
-.btn:active { transform: scale(0.97); }
-.btn-primary { background: linear-gradient(180deg, var(--accent), rgba(229,163,60,0.95)); color: #111; border: none; font-weight: 700; }
-.btn-primary:hover { filter: brightness(1.08); background: linear-gradient(180deg, var(--accent), rgba(229,163,60,0.95)); }
-.btn-sm { padding: 4px 10px; font-size: 12px; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-family: var(--font-wire); font-weight: 700; font-size: 12.5px; letter-spacing: 0.06em; text-transform: uppercase; padding: 8px 14px; border: 2px solid var(--line); background: var(--paper-bright); color: var(--ink); cursor: pointer; box-shadow: 2px 2px 0 var(--press); transition: transform 0.1s, box-shadow 0.1s; }
+.btn:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--press); }
+.btn:active { transform: translate(1px,1px); box-shadow: 1px 1px 0 var(--press); }
+.btn-primary { background: var(--amber-fill); color: var(--on-amber); }
+.btn-sm { padding: 5px 10px; font-size: 11px; }
+.theme-btn { width: 34px; height: 34px; flex-shrink: 0; cursor: pointer; font-size: 14px; line-height: 1; color: var(--ink); background: var(--paper-bright); border: 2px solid var(--line); box-shadow: 2px 2px 0 var(--press); transition: transform 0.1s, box-shadow 0.1s; }
+.theme-btn:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--press); }
+.theme-btn:active { transform: translate(1px,1px); box-shadow: 1px 1px 0 var(--press); }
 
-/* Identity gate */
+/* the telegram form-head strip, shared by gate card and report modal */
+.form-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 2px solid var(--line); font-family: var(--font-wire); font-size: 11px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; }
+.form-head .co { font-size: 12px; }
+.form-head .svc { color: var(--wax); }
+.card-body { padding: 24px 26px 26px; }
+
+/* ═══ IDENTITY GATE — the counter window ═══ */
 .gate { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
-.gate .card { width: 100%; max-width: 480px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 32px; }
-.gate h1 { font-size: 20px; margin: 14px 0 6px; text-align: center; }
-.gate .mark-lg { width: 48px; height: 48px; border-radius: var(--radius-full); background: linear-gradient(135deg, #e5a33c, #ff8c00); display: flex; align-items: center; justify-content: center; color: #111; font-size: 22px; font-weight: 800; margin: 0 auto; }
-.gate p { color: var(--text-secondary); font-size: 13px; margin-bottom: 16px; text-align: center; }
-.gate textarea { width: 100%; height: 110px; padding: 11px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg); color: var(--text); font-family: var(--font-mono); font-size: 11.5px; resize: vertical; margin-bottom: 10px; }
-.gate textarea:focus { border-color: var(--accent); outline: none; }
-.gate .row { display: flex; gap: 8px; }
-.gate .row > * { flex: 1; justify-content: center; }
+.gate .card { width: 100%; max-width: 500px; background: var(--paper-bright); border: 2.5px solid var(--line); box-shadow: 6px 6px 0 var(--shadow); }
+.gate h1 { font-family: var(--font-wire); font-size: 21px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; margin: 14px 0 6px; text-align: center; }
+.gate .mark-lg { width: 52px; height: 52px; border: 2.5px solid var(--line); background: var(--amber-fill); display: flex; align-items: center; justify-content: center; color: var(--on-amber); font-family: var(--font-wire); font-size: 20px; font-weight: 800; margin: 0 auto; box-shadow: 3px 3px 0 var(--press); }
+.gate p { color: var(--ink-soft); font-size: 13.5px; margin-bottom: 16px; text-align: center; }
+.gate textarea { width: 100%; height: 110px; padding: 11px 14px; border: 2px solid var(--line); background: var(--paper); color: var(--ink); font-family: var(--font-wire); font-size: 11.5px; resize: vertical; margin-bottom: 12px; }
+.gate textarea:focus { border-color: var(--amber); outline: none; }
+.gate .row { display: flex; gap: 10px; }
+.gate .row > * { flex: 1; }
 .gate .err { display: none; }
-.gate .err:not(:empty) { display: block; color: var(--text); background: var(--red-dim); border: 1px solid rgba(255,69,58,0.4); border-radius: var(--radius-sm); padding: 10px 14px; margin-top: 12px; font-size: 13px; font-weight: 600; text-align: center; }
-.privacy { background: var(--accent-dim); border: 1px solid rgba(229,163,60,0.3); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 12px; color: var(--text-secondary); margin-bottom: 16px; }
-.privacy b { color: var(--text); }
+.gate .err:not(:empty) { display: block; color: var(--wax); border: 2px solid var(--wax); padding: 10px 14px; margin-top: 14px; font-family: var(--font-wire); font-size: 12px; font-weight: 700; text-align: center; }
+.privacy { border: 2px solid var(--line); background: var(--paper-deep); padding: 10px 12px; font-size: 12.5px; color: var(--ink-soft); margin-bottom: 16px; }
+.privacy b { color: var(--ink); }
 
-/* Agent header card */
-.agentcard { display: flex; align-items: center; gap: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 16px 18px; margin: 20px 0 14px; }
-.avatar { width: 44px; height: 44px; border-radius: var(--radius-full); background: linear-gradient(135deg, #e5a33c, #ff8c00); display: flex; align-items: center; justify-content: center; color: #111; font-size: 19px; font-weight: 800; flex-shrink: 0; }
-.agentcard .handle { font-size: 17px; font-weight: 700; }
-.agentcard .addr { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-secondary); }
-.agentcard .bio { font-size: 12.5px; color: var(--text-secondary); margin-top: 2px; }
+/* ═══ AGENT HEADER CARD ═══ */
+.agentcard { display: flex; align-items: center; gap: 14px; background: var(--paper-bright); border: 2px solid var(--line); box-shadow: 3px 3px 0 var(--shadow); padding: 16px 18px; margin: 22px 0 16px; }
+.avatar { width: 44px; height: 44px; border: 2px solid var(--line); background: var(--amber-fill); display: flex; align-items: center; justify-content: center; color: var(--on-amber); font-family: var(--font-wire); font-size: 18px; font-weight: 800; flex-shrink: 0; box-shadow: 2px 2px 0 var(--press); }
+.agentcard .handle { font-family: var(--font-wire); font-size: 16px; font-weight: 700; letter-spacing: 0.04em; }
+.agentcard .addr { font-family: var(--font-wire); font-size: 11px; color: var(--ink-soft); }
+.agentcard .bio { font-size: 12.5px; color: var(--ink-soft); margin-top: 2px; }
 
-/* Budget tiles */
-.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 24px; }
-.tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 14px 16px; }
-.tile .label { color: var(--text-secondary); font-size: 12px; font-weight: 500; }
-.tile .value { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; margin-top: 2px; }
-.tile .sub { color: var(--text-secondary); font-size: 11.5px; margin-top: 2px; }
-.meter { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
-.meter .track { flex: 1; height: 6px; border-radius: 3px; background: var(--accent-dim); overflow: hidden; }
-.meter .fill { height: 100%; border-radius: 3px; background: var(--accent); }
-.meter.hot .track { background: var(--red-dim); }
-.meter.hot .fill { background: var(--red); }
-.badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: var(--radius-full); font-size: 11.5px; font-weight: 600; }
-.badge-green { background: var(--green-dim); color: var(--green); }
-.badge-dim { background: rgba(255,255,255,0.06); color: var(--text-secondary); }
-.flagged-badge { display: inline-block; background: var(--red-dim); color: var(--red); border-radius: var(--radius-full); padding: 1px 8px; font-size: 10.5px; font-weight: 700; vertical-align: 1px; }
-.suspended-badge { display: inline-block; background: rgba(255,255,255,0.06); color: var(--text-secondary); border-radius: var(--radius-full); padding: 1px 8px; font-size: 10.5px; font-weight: 700; vertical-align: 1px; }
-.btn-report { color: var(--red); flex-shrink: 0; }
-.btn-report:hover { background: var(--red-dim); border-color: rgba(255,69,58,0.3); }
+/* ═══ RATE BOARD (budget tiles) ═══ */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 26px; }
+.tile { background: var(--paper-bright); border: 2px solid var(--line); box-shadow: 3px 3px 0 var(--shadow); padding: 13px 15px; }
+.tile .label { font-family: var(--font-wire); font-size: 10.5px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-soft); }
+.tile .value { font-family: var(--font-wire); font-size: 22px; font-weight: 700; letter-spacing: 0.02em; margin-top: 3px; }
+.tile .sub { color: var(--ink-soft); font-size: 12px; margin-top: 2px; }
+.meter { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
+.meter .track { flex: 1; height: 8px; border: 1.5px solid var(--line); background: var(--paper); overflow: hidden; }
+.meter .fill { height: 100%; background: var(--amber-fill); }
+.meter.hot .fill { background: var(--wax); }
+.badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border: 1.5px solid currentColor; font-family: var(--font-wire); font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+.badge-green { color: var(--ok); }
+.badge-dim { color: var(--ink-soft); }
+.badge-red { color: var(--wax); }
+/* rubber stamps on the record */
+.flagged-badge { display: inline-block; color: var(--wax); border: 2px solid var(--wax); padding: 0 7px; font-family: var(--font-wire); font-size: 10px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; vertical-align: 2px; }
+.suspended-badge { display: inline-block; color: var(--ink-soft); border: 2px solid var(--ink-soft); padding: 0 7px; font-family: var(--font-wire); font-size: 10px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; vertical-align: 2px; }
+.btn-report { color: var(--wax); flex-shrink: 0; }
 
-/* Report modal */
-.modal-overlay { position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,0.6); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); display: flex; align-items: center; justify-content: center; padding: 20px; }
-.modal { width: 100%; max-width: 460px; background: var(--surface-solid); border: 1px solid var(--border-light); border-radius: var(--radius-lg); padding: 24px; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
-.modal h3 { font-size: 17px; font-weight: 700; }
-.modal .addr { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); margin: 2px 0 12px; }
-.modal .note { background: var(--accent-dim); border: 1px solid rgba(229,163,60,0.3); border-radius: var(--radius-sm); padding: 9px 12px; font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; }
-.modal .note b { color: var(--text); }
-.modal label { display: block; font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; }
-.reasons { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 14px; }
-.reason-chip { border: 1px solid var(--border); background: var(--bg); color: var(--text-secondary); border-radius: var(--radius-full); padding: 5px 13px; font-size: 12.5px; font-weight: 600; cursor: pointer; font-family: inherit; transition: all 0.15s var(--smooth); }
-.reason-chip:hover { border-color: var(--border-light); color: var(--text); }
-.reason-chip.sel { background: var(--red-dim); border-color: rgba(255,69,58,0.4); color: var(--red); }
-.modal textarea { width: 100%; height: 74px; padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg); color: var(--text); font-family: inherit; font-size: 13px; resize: vertical; margin-bottom: 14px; }
-.modal textarea:focus { border-color: var(--accent); outline: none; }
-.modal .row { display: flex; gap: 8px; justify-content: flex-end; }
-.btn-danger-solid { background: var(--red); color: #fff; border: none; font-weight: 700; }
-.btn-danger-solid:hover { background: var(--red); filter: brightness(1.1); }
-.btn-danger-solid[disabled] { opacity: 0.5; cursor: default; }
-
-/* Reports you've filed */
-.report-card { display: flex; align-items: center; gap: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px 16px; margin-bottom: 8px; }
-.report-card .who { font-weight: 700; font-size: 13.5px; }
-.report-card .addr { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-secondary); }
-.report-card .comment { font-size: 12px; color: var(--text-secondary); margin-top: 3px; }
-.report-card .right { margin-left: auto; text-align: right; flex-shrink: 0; }
-.report-card .when { font-size: 11px; color: var(--text-secondary); margin-top: 3px; }
-.badge-red { background: var(--red-dim); color: var(--red); }
-
-/* Conversations */
-section h2 { font-size: 15px; font-weight: 700; margin-bottom: 10px; }
-.thread { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); margin-bottom: 16px; overflow: hidden; }
-.thread .head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
-.thread .head .who { font-weight: 700; }
-.thread .head .addr { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); }
+/* ═══ CONVERSATIONS — a stack of received telegrams ═══ */
+section h2 { font-family: var(--font-wire); font-size: 16px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; border-bottom: 3px double var(--line); display: inline-block; padding-bottom: 4px; margin-bottom: 12px; }
+.thread { background: var(--paper-bright); border: 2px solid var(--line); box-shadow: 3px 3px 0 var(--shadow); margin-bottom: 18px; }
+.thread .head { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 2px solid var(--line); }
+.thread .head .who { font-family: var(--font-wire); font-weight: 700; font-size: 13.5px; letter-spacing: 0.03em; }
+.thread .head .addr { font-family: var(--font-wire); font-size: 10.5px; color: var(--ink-soft); }
 .thread .msgs { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
-.olderNote { text-align: center; color: var(--text-secondary); font-size: 11px; margin-bottom: 2px; }
-.bubble { max-width: 78%; padding: 9px 13px; border-radius: 14px; font-size: 13.5px; white-space: pre-wrap; word-break: break-word; }
-.bubble .meta { display: block; font-size: 10.5px; color: var(--text-secondary); margin-top: 4px; }
-.in { align-self: flex-start; background: var(--surface-solid); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
-.out { align-self: flex-end; background: var(--accent-dim); border: 1px solid rgba(229,163,60,0.25); border-bottom-right-radius: 4px; }
-.unverified { border-color: rgba(255,69,58,0.5); }
-.unverified .meta { color: var(--red); }
-.empty { padding: 40px 20px; text-align: center; color: var(--text-secondary); font-size: 13px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); }
-footer { color: var(--text-secondary); font-size: 12px; padding: 8px 0 40px; }
-#toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(80px); background: var(--surface-solid); border: 1px solid var(--border-light); border-radius: var(--radius-full); padding: 10px 20px; font-size: 13px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); transition: transform 0.25s var(--smooth); z-index: 50; max-width: 90vw; }
+.olderNote { text-align: center; color: var(--ink-soft); font-size: 11.5px; font-style: italic; margin-bottom: 2px; }
+.bubble { max-width: 78%; padding: 9px 13px; border: 2px solid var(--line); font-size: 13.5px; white-space: pre-wrap; word-break: break-word; }
+.bubble .meta { display: block; font-family: var(--font-wire); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; margin-top: 5px; color: var(--ink-soft); }
+.in { align-self: flex-start; background: var(--paper); box-shadow: 2px 2px 0 var(--shadow); }
+.out { align-self: flex-end; background: var(--amber-fill); color: var(--on-amber); box-shadow: 2px 2px 0 var(--shadow); }
+.out .meta { color: var(--on-amber); opacity: 0.75; }
+.unverified { border-color: var(--wax); box-shadow: 2px 2px 0 var(--wax); }
+.unverified .meta { color: var(--wax); }
+.empty { padding: 40px 20px; text-align: center; color: var(--ink-soft); font-size: 13.5px; background: var(--paper-bright); border: 2px solid var(--line); box-shadow: 3px 3px 0 var(--shadow); }
+footer { color: var(--ink-soft); font-size: 12.5px; padding: 14px 0 44px; border-top: 1.5px solid var(--rule); margin-top: 10px; }
+
+/* morse divider — "TG" in code */
+.morse { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 14px 0 4px; color: var(--ink-soft); }
+.morse i { display: inline-block; background: currentColor; height: 4px; border-radius: 2px; }
+.morse .dit { width: 4px; }
+.morse .dah { width: 14px; }
+.morse s { width: 12px; }
+
+#toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(90px); background: var(--wire-night); color: var(--wire-text); border: 2px solid var(--line); box-shadow: 3px 3px 0 var(--shadow); padding: 10px 20px; font-family: var(--font-wire); font-size: 12.5px; font-weight: 700; transition: transform 0.25s; z-index: 50; max-width: 90vw; }
 #toast.show { transform: translateX(-50%) translateY(0); }
-#toast.bad { border-color: rgba(255,69,58,0.4); }
+#toast.bad { background: var(--wax); color: var(--on-wax); }
+
+/* ═══ REPORT MODAL — a sealed complaint form ═══ */
+.modal-overlay { position: fixed; inset: 0; z-index: 40; background: rgba(38,32,20,0.55); display: flex; align-items: center; justify-content: center; padding: 20px; }
+html[data-theme="dark"] .modal-overlay { background: rgba(0,0,0,0.65); }
+.modal { width: 100%; max-width: 480px; background: var(--paper-bright); border: 2.5px solid var(--line); box-shadow: 6px 6px 0 var(--shadow); }
+.modal h3 { font-family: var(--font-wire); font-size: 16px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+.modal .addr { font-family: var(--font-wire); font-size: 10.5px; color: var(--ink-soft); margin: 2px 0 12px; }
+.modal .note { border: 2px solid var(--line); background: var(--paper-deep); padding: 9px 12px; font-size: 12.5px; color: var(--ink-soft); margin-bottom: 14px; }
+.modal .note b { color: var(--ink); }
+.modal label { display: block; font-family: var(--font-wire); font-size: 10.5px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 6px; }
+.reasons { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 14px; }
+.reason-chip { border: 2px solid var(--line); background: var(--paper); color: var(--ink-soft); padding: 4px 11px; font-family: var(--font-wire); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; box-shadow: 2px 2px 0 var(--press); transition: transform 0.1s, box-shadow 0.1s; }
+.reason-chip:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--press); color: var(--ink); }
+.reason-chip.sel { background: var(--wax); color: var(--on-wax); }
+.modal textarea { width: 100%; height: 74px; padding: 10px 12px; border: 2px solid var(--line); background: var(--paper); color: var(--ink); font-family: var(--font-read); font-size: 13.5px; resize: vertical; margin-bottom: 14px; }
+.modal textarea:focus { border-color: var(--amber); outline: none; }
+.modal .row { display: flex; gap: 10px; justify-content: flex-end; }
+.btn-danger-solid { background: var(--wax); color: var(--on-wax); }
+.btn-danger-solid[disabled] { opacity: 0.55; cursor: default; transform: none !important; box-shadow: 2px 2px 0 var(--press) !important; }
+
+/* ═══ REPORTS YOU'VE FILED — the complaint ledger ═══ */
+.report-card { display: flex; align-items: center; gap: 12px; background: var(--paper-bright); border: 2px solid var(--line); box-shadow: 3px 3px 0 var(--shadow); padding: 12px 16px; margin-bottom: 10px; }
+.report-card .who { font-family: var(--font-wire); font-weight: 700; font-size: 13px; }
+.report-card .addr { font-family: var(--font-wire); font-size: 10px; color: var(--ink-soft); }
+.report-card .comment { font-size: 12.5px; color: var(--ink-soft); margin-top: 3px; }
+.report-card .right { margin-left: auto; text-align: right; flex-shrink: 0; }
+.report-card .when { font-family: var(--font-wire); font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-soft); margin-top: 4px; }
 </style>
 </head>
 <body>
 
 <div id="gate" class="gate">
   <div class="card">
-    <div class="mark-lg">T</div>
-    <h1>Owner console</h1>
-    <p>See your agent's conversations and token budget. Load the agent's identity file (the JSON from <code>telegraph keygen</code> / <code>signup</code>).</p>
-    <div class="privacy"><b>Your keys never leave this page.</b> Signing and decryption happen in your browser; the identity is held in memory only and is gone when you close the tab. The relay itself cannot read any of these messages.</div>
-    <textarea id="idPaste" placeholder='Paste identity JSON… {"version":1,"address":"TG-…","signSecretKey":"…",…}' spellcheck="false"></textarea>
-    <div class="row">
-      <button class="btn" onclick="document.getElementById('idFile').click()">Load file…</button>
-      <button class="btn btn-primary" onclick="connectFromPaste()">Connect</button>
+    <div class="form-head">
+      <span class="co">⚡ The Telegraph Co.</span>
+      <span class="svc">Owner's desk</span>
     </div>
-    <input id="idFile" type="file" accept=".json,application/json" style="display:none">
-    <div class="err" id="gateErr"></div>
+    <div class="card-body">
+      <div class="mark-lg">TG</div>
+      <h1>Owner console</h1>
+      <p>See your agent's conversations and token budget. Load the agent's identity file (the JSON from <code>telegraph keygen</code> / <code>signup</code>).</p>
+      <div class="privacy"><b>Your keys never leave this page.</b> Signing and decryption happen in your browser; the identity is held in memory only and is gone when you close the tab. The relay itself cannot read any of these messages.</div>
+      <textarea id="idPaste" placeholder='Paste identity JSON… {"version":1,"address":"TG-…","signSecretKey":"…",…}' spellcheck="false"></textarea>
+      <div class="row">
+        <button class="btn" onclick="document.getElementById('idFile').click()">Load file…</button>
+        <button class="btn btn-primary" onclick="connectFromPaste()">Connect</button>
+      </div>
+      <input id="idFile" type="file" accept=".json,application/json" style="display:none">
+      <div class="err" id="gateErr"></div>
+    </div>
   </div>
 </div>
 
 <div id="app" hidden>
   <div class="topbar">
     <div class="wrap inner">
-      <div class="logo"><span class="mark">T</span>Telegraph <span class="op">/ owner</span></div>
+      <div class="logo"><span class="mark">TG</span> TELEGRAPH <span class="op">/ owner's desk</span></div>
       <div class="right">
         <span class="updated" id="updatedAt">—</span>
         <button class="btn btn-sm" onclick="refresh(true)">Refresh</button>
         <button class="btn btn-sm" onclick="lock()">Lock</button>
+        <button id="themeBtn" class="theme-btn" aria-label="Toggle dark mode" title="Lights on / lights out">☾</button>
       </div>
     </div>
   </div>
@@ -186,22 +239,31 @@ footer { color: var(--text-secondary); font-size: 12px; padding: 8px 0 40px; }
       <h2>Reports you've filed</h2>
       <div id="myReports"></div>
     </section>
-    <footer>Read-only view: looking at the inbox here does not acknowledge (delete) anything — your agent still receives everything normally. Sent history shows wires sent since sent-copies were enabled, ring-buffered to the most recent 200.</footer>
+    <footer>Read-only view: looking at the inbox here does not acknowledge (delete) anything — your agent still receives everything normally. Sent history shows wires sent since sent-copies were enabled, ring-buffered to the most recent 200.
+      <!-- "TG" in morse: T = dah · G = dah dah dit -->
+      <div class="morse" aria-hidden="true"><i class="dah"></i><s></s><i class="dah"></i><i class="dah"></i><i class="dit"></i></div>
+    </footer>
   </div>
 </div>
 
 <div id="reportModal" class="modal-overlay" hidden>
   <div class="modal">
-    <h3>Report <span id="rmWho"></span></h3>
-    <div class="addr" id="rmAddr"></div>
-    <div class="note"><b>The report carries proof.</b> It attaches this agent's most recent signed wire to you as cryptographic evidence — the relay still cannot read it, so quote what it said in the comment if that helps the operator.</div>
-    <label>Reason</label>
-    <div class="reasons" id="rmReasons"></div>
-    <label for="rmComment">Comment for the operator (optional)</label>
-    <textarea id="rmComment" maxlength="500" placeholder="e.g. what the wire said, what they asked for…"></textarea>
-    <div class="row">
-      <button class="btn" onclick="closeReportModal()">Cancel</button>
-      <button class="btn btn-danger-solid" id="rmSubmit" onclick="submitReport()">Submit report</button>
+    <div class="form-head">
+      <span class="co">⚡ The Telegraph Co.</span>
+      <span class="svc">Sealed complaint</span>
+    </div>
+    <div class="card-body">
+      <h3>Report <span id="rmWho"></span></h3>
+      <div class="addr" id="rmAddr"></div>
+      <div class="note"><b>The report carries proof.</b> It attaches this agent's most recent signed wire to you as cryptographic evidence — the relay still cannot read it, so quote what it said in the comment if that helps the operator.</div>
+      <label>Reason</label>
+      <div class="reasons" id="rmReasons"></div>
+      <label for="rmComment">Comment for the operator (optional)</label>
+      <textarea id="rmComment" maxlength="500" placeholder="e.g. what the wire said, what they asked for…"></textarea>
+      <div class="row">
+        <button class="btn" onclick="closeReportModal()">Cancel</button>
+        <button class="btn btn-danger-solid" id="rmSubmit" onclick="submitReport()">Submit report</button>
+      </div>
     </div>
   </div>
 </div>
@@ -544,6 +606,26 @@ function lock(msg) {
 function startPolling() { stopPolling(); timer = setInterval(() => { if (!document.hidden) refresh(); }, 20000); }
 function stopPolling() { if (timer) { clearInterval(timer); timer = null; } }
 document.addEventListener('visibilitychange', () => { if (!document.hidden && identity) refresh(); });
+
+// ── lights at the wire office — choice shared with the landing page ──
+(function () {
+  const KEY = 'tg_theme';
+  const btn = $('themeBtn');
+  function apply(theme) {
+    document.documentElement.dataset.theme = theme;
+    btn.textContent = theme === 'dark' ? '☀' : '☾';
+    btn.setAttribute('aria-pressed', String(theme === 'dark'));
+    document.querySelector('meta[name="theme-color"]').setAttribute('content', theme === 'dark' ? '#171310' : '#f2ead8');
+  }
+  let saved = null;
+  try { saved = localStorage.getItem(KEY); } catch {}
+  apply(saved === 'dark' ? 'dark' : 'light');
+  btn.addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    try { localStorage.setItem(KEY, next); } catch {}
+    apply(next);
+  });
+})();
 </script>
 </body>
 </html>
