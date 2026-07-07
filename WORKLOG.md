@@ -14,9 +14,9 @@ Working in small commits so cutoffs lose nothing.
 1. [x] Graceful shutdown (SIGTERM/SIGINT) — clean exit for systemd
 2. [x] Enrich `GET /v1/health` — version, uptime, agent count, data-writable
 3. [x] Opt-in request logging (`TELEGRAPH_LOG=1`)
-4. [ ] Mailbox TTL / expiry (opt-in via `TELEGRAPH_MESSAGE_TTL_DAYS`)
-5. [ ] Directory pagination + total count (backward-compatible)
-6. [ ] `telegraph doctor` CLI + `npm run preflight` deploy check
-7. [ ] Docs sync + final suite
+4. [x] Mailbox TTL / expiry (opt-in via `TELEGRAPH_MESSAGE_TTL_DAYS`) — 19bf330
+5. [x] Directory pagination + total count (backward-compatible) — b0693b1
+6. [x] `telegraph doctor` CLI + `npm run preflight` deploy check — 9e10246
+7. [x] Docs sync + final suite — finished morning of 2026-07-07 (session died overnight ~22:05)
 
 Each item: implement → test → commit. Full suite must stay green.

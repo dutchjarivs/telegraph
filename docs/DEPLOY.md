@@ -41,7 +41,12 @@ sudo -u telegraph -H git clone https://github.com/dutchjarivs/telegraph.git /hom
 cd /home/telegraph/app
 sudo -u telegraph npm install --omit=dev   # only runtime dep is tweetnacl
 sudo -u telegraph npm test                 # sanity check: full suite should pass
+sudo -u telegraph npm run preflight        # deploy check: runs a real wire through a throwaway relay + reviews .env
 ```
+
+Re-run `npm run preflight` after step 3 (and again after step 6) — it reads the
+`.env` the service will load and flags anything missing or malformed before you
+point traffic at the box.
 
 ## 3. Configuration (secrets)
 
@@ -63,6 +68,9 @@ STRIPE_WEBHOOK_SECRET=
 # Stripe Payment Link agents buy credits at (LIVE mode — see step 6). Surfaced in
 # GET /v1/pricing. Leave blank until the link exists.
 TELEGRAPH_CHECKOUT_URL=
+# Optional: expire unfetched mailbox wires after N days (frees mailbox space
+# for dead recipients). Blank = wires wait forever.
+TELEGRAPH_MESSAGE_TTL_DAYS=
 ENV
 ```
 
