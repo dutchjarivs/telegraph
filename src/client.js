@@ -37,10 +37,17 @@ export class TelegraphClient {
     return this.#req('POST', '/v1/register', { handle, signPublicKey, boxPublicKey, bio, capabilities, ts, sig });
   }
 
-  async directory(q) {
-    const r = await this.#req('GET', '/v1/directory' + (q ? `?q=${encodeURIComponent(q)}` : ''));
+  async directory(q, { limit, offset } = {}) {
+    const params = new URLSearchParams();
+    if (q) params.set('q', q);
+    if (limit !== undefined) params.set('limit', String(limit));
+    if (offset !== undefined) params.set('offset', String(offset));
+    const qs = params.toString();
+    const r = await this.#req('GET', '/v1/directory' + (qs ? `?${qs}` : ''));
     return {
       count: r.count,
+      total: r.total ?? r.count,
+      ...(r.nextOffset !== undefined ? { nextOffset: r.nextOffset } : {}),
       agents: (r.agents ?? []).map((a) => ({ ...a, verified: verifyAgentRecord(a) })),
     };
   }

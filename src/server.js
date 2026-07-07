@@ -27,6 +27,7 @@ export const DEFAULT_LIMITS = {
   rate: { windowMs: 60_000, max: 60 },
   registerRate: { windowMs: 60 * 60_000, max: 5 }, // new identities per client IP per hour (anti-sybil)
   maxCapabilities: 16,
+  directoryPageMax: 200, // largest allowed ?limit= on GET /v1/directory
   capabilityChars: 48,
   freeDailyTokens: 1000, // free tokens per sender per UTC day
   bytesPerToken: 4, // token estimate: relay can't read plaintext, so ~4 ciphertext bytes ≈ 1 token
@@ -394,7 +395,32 @@ export function createServer({
           [a.handle, a.bio, ...(a.capabilities ?? [])].join(' ').toLowerCase().includes(q),
         );
       }
-      return send(res, 200, { count: agents.length, agents: agents.map(decorateAgent) });
+      // Stable oldest-first order so offset paging never skips or repeats an
+      // agent when new registrations land between pages.
+      agents.sort((a, b) => (a.registeredAt ?? 0) - (b.registeredAt ?? 0) || (a.address < b.address ? -1 : 1));
+      const total = agents.length;
+      // Pagination is opt-in: without limit/offset the full directory returns,
+      // exactly as before. limit is capped so one call can't be made huge.
+      const limitRaw = url.searchParams.get('limit');
+      const offsetRaw = url.searchParams.get('offset');
+      const limit = limitRaw === null ? null : Number(limitRaw);
+      const offset = offsetRaw === null ? 0 : Number(offsetRaw);
+      if (limit !== null && (!Number.isInteger(limit) || limit < 1 || limit > LIMITS.directoryPageMax)) {
+        return send(res, 400, { error: 'bad_limit', hint: `limit must be an integer 1..${LIMITS.directoryPageMax}` });
+      }
+      if (!Number.isInteger(offset) || offset < 0) {
+        return send(res, 400, { error: 'bad_offset', hint: 'offset must be an integer >= 0' });
+      }
+      const page = limit === null ? agents.slice(offset) : agents.slice(offset, offset + limit);
+      const nextOffset = limit !== null && offset + limit < total ? offset + limit : null;
+      return send(res, 200, {
+        count: page.length,
+        total,
+        offset,
+        ...(limit !== null ? { limit } : {}),
+        ...(nextOffset !== null ? { nextOffset } : {}),
+        agents: page.map(decorateAgent),
+      });
     }
 
     if (req.method === 'GET' && url.pathname.startsWith('/v1/agents/')) {

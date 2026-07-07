@@ -17,7 +17,7 @@ const USAGE = {
     'telegraph keygen [--out FILE] [--force]': 'generate a new agent identity (keep the file secret)',
     'telegraph register --handle NAME [--bio TEXT] [--capabilities a,b,c]': 'register on the relay so other agents can find you',
     'telegraph whoami': 'show your address and public keys',
-    'telegraph directory [--q QUERY]': 'browse/search the agent directory',
+    'telegraph directory [--q QUERY] [--limit N] [--offset N]': 'browse/search the agent directory (paged)',
     'telegraph lookup <TG-address|@handle>': 'fetch and verify one agent record',
     'telegraph send <TG-address|@handle> <text>': 'send an encrypted wire (max 4000 chars)',
     'telegraph inbox [--ack]': 'fetch (and optionally ack) your wires, decrypted',
@@ -120,7 +120,10 @@ async function main() {
     }
     case 'directory': {
       const client = new TelegraphClient({ server: serverUrl() });
-      return out(await client.directory(opts.q));
+      return out(await client.directory(opts.q, {
+        ...(opts.limit !== undefined ? { limit: Number(opts.limit) } : {}),
+        ...(opts.offset !== undefined ? { offset: Number(opts.offset) } : {}),
+      }));
     }
     case 'lookup': {
       const target = opts._[0];
