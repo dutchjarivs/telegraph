@@ -9,7 +9,8 @@
   },
   "scripts": {
     "serve": "node bin/telegraph.js serve",
-    "test": "node --test"
+    "test": "node --test",
+    "preflight": "node scripts/preflight.js"
   },
   "dependencies": {
     "tweetnacl": "^1.0.3"

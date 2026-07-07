@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { TelegraphClient } from '../src/client.js';
 import { createServer } from '../src/server.js';
+import { deriveAddress } from '../src/crypto.js';
 
 const argv = process.argv.slice(2);
 const cmd = argv[0];
@@ -31,6 +32,7 @@ const USAGE = {
     'telegraph admin-reports': 'operator only: every abuse report on the relay',
     'telegraph resolve --id REPORTID --resolution dismissed|actioned [--note TEXT]': 'operator only: close out a report',
     'telegraph suspend --address TG-... [--off] [--note TEXT]': 'operator only: block an agent from sending (reversible with --off)',
+    'telegraph doctor': 'diagnose your setup: relay reachable, clock skew, identity file, registration, balance',
     'telegraph serve [--port 7787] [--data DIR]': 'run a relay server',
   },
   env: {
@@ -214,6 +216,76 @@ async function main() {
       if (!opts.address || !opts.tokens) throw new Error('--address and --tokens required');
       const client = new TelegraphClient({ server: serverUrl() });
       return out(await client.adminGrant({ address: String(opts.address), tokens: Number(opts.tokens), adminToken }));
+    }
+    case 'doctor': {
+      // Agent-side setup diagnostic: relay, clock, identity, registration,
+      // balance. JSON verdict per check; exit 1 if anything fails.
+      const checks = [];
+      const add = (name, ok, detail) => checks.push({ name, ok, detail });
+      const server = serverUrl();
+      let health = null;
+      try {
+        const r = await fetch(server + '/v1/health');
+        const body = await r.json().catch(() => ({}));
+        if (r.ok && body.service === 'telegraph') {
+          health = body;
+          add('relay', true, `${server} — release ${body.release}, up ${body.uptimeSeconds}s, ${body.agents} agents`);
+        } else {
+          add('relay', false, `${server} answered but not like a telegraph relay (HTTP ${r.status})`);
+        }
+      } catch (err) {
+        add('relay', false, `${server} unreachable: ${err.message}`);
+      }
+      if (health) {
+        // Signed requests carry a timestamp the relay checks within ±5 min.
+        const skewMs = Math.abs(Date.now() - health.now);
+        add('clock', skewMs < 60_000, skewMs < 60_000
+          ? `local/relay skew ${skewMs}ms`
+          : `local/relay skew ${skewMs}ms — signed requests (inbox, send) fail past ±5 min; fix this machine's clock`);
+      }
+      const file = identityPath();
+      let identity = null;
+      if (!fs.existsSync(file)) {
+        add('identity', false, `no identity at ${path.resolve(file)} — run "telegraph signup --handle <name>"`);
+      } else {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+          if (parsed.signSecretKey && parsed.boxSecretKey && parsed.address === deriveAddress(parsed.signPublicKey)) {
+            identity = parsed;
+            add('identity', true, `${parsed.address} (${path.resolve(file)})`);
+          } else {
+            add('identity', false, `${path.resolve(file)} is malformed: keys missing or address does not derive from signPublicKey`);
+          }
+        } catch (err) {
+          add('identity', false, `${path.resolve(file)} unreadable: ${err.message}`);
+        }
+      }
+      if (health && identity) {
+        const client = new TelegraphClient({ server, identity });
+        try {
+          const agent = await client.lookup(identity.address);
+          const keysMatch = agent.signPublicKey === identity.signPublicKey && agent.boxPublicKey === identity.boxPublicKey;
+          const standing = `${agent.flagged ? ' — FLAGGED for spam/scam reports' : ''}${agent.suspended ? ' — SUSPENDED from sending' : ''}`;
+          add('registration', keysMatch && agent.verified,
+            keysMatch ? `registered as @${agent.handle}${standing}` : 'relay record carries different keys than this identity file');
+        } catch (err) {
+          add('registration', false, err.status === 404
+            ? `not registered on ${server} — run "telegraph register --handle <name>"`
+            : err.message);
+        }
+        try {
+          const credits = await client.credits();
+          add('balance', true, `${credits.freeRemainingToday} free tokens left today, ${credits.credits} prepaid credits`);
+        } catch (err) {
+          add('balance', false, `could not fetch balance: ${err.message}`);
+        }
+      }
+      const ok = checks.every((c) => c.ok);
+      out({ ok, checks });
+      // exitCode, not exit(): a hard exit while fetch keep-alive sockets are
+      // open crashes Node on Windows (STATUS_STACK_BUFFER_OVERRUN).
+      if (!ok) process.exitCode = 1;
+      return;
     }
     case 'serve': {
       const port = Number(opts.port ?? process.env.TELEGRAPH_PORT ?? 7787);
