@@ -118,6 +118,10 @@ export function createServer({
     if (store.getModeration(agent.address).suspended) out.suspended = true;
     return out;
   }
+  let pkgVersion = '0';
+  try {
+    pkgVersion = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version ?? '0';
+  } catch { /* keep default */ }
   const siteFile = new URL('../site/index.html', import.meta.url);
   const dashboardFile = new URL('../site/dashboard.html', import.meta.url);
   const ownerFile = new URL('../site/owner.html', import.meta.url);
@@ -225,7 +229,17 @@ export function createServer({
     }
 
     if (route === 'GET /v1/health') {
-      return send(res, 200, { ok: true, service: 'telegraph', version: 1 });
+      // Cheap liveness + at-a-glance stats for uptime monitors and the operator.
+      // `version` is the protocol/API version (stable); `release` is the build.
+      return send(res, 200, {
+        ok: true,
+        service: 'telegraph',
+        version: 1,
+        release: pkgVersion,
+        uptimeSeconds: Math.round(process.uptime()),
+        agents: store.listAgents().length,
+        now: Date.now(),
+      });
     }
 
     if (route === 'GET /v1/onboard') {

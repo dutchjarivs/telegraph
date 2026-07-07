@@ -29,10 +29,14 @@ test.after(async () => {
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
-test('health check', async () => {
+test('health check reports liveness plus at-a-glance stats', async () => {
   const r = await fetch(`${base}/v1/health`).then((r) => r.json());
   assert.equal(r.ok, true);
   assert.equal(r.service, 'telegraph');
+  assert.equal(r.version, 1); // protocol version stays stable
+  assert.equal(typeof r.release, 'string'); // package build version
+  assert.equal(typeof r.uptimeSeconds, 'number');
+  assert.equal(typeof r.agents, 'number');
 });
 
 test('agents register and get TG- addresses', async () => {
