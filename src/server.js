@@ -83,6 +83,10 @@ export function createServer({
   // Only trust x-forwarded-for when a reverse proxy (Caddy, cloudflared) sets it;
   // trusting it on a directly exposed relay lets clients spoof their IP.
   trustProxy = process.env.TELEGRAPH_TRUST_PROXY === '1',
+  // Opt-in one-line access log per request (method, path, status, ms). Never
+  // logs bodies, query strings, or auth headers. Off unless TELEGRAPH_LOG=1.
+  logRequests = process.env.TELEGRAPH_LOG === '1',
+  log = console.log,
 } = {}) {
   const LIMITS = { ...DEFAULT_LIMITS, ...limits };
   const store = new Storage(dataDir);
@@ -131,6 +135,15 @@ export function createServer({
   const readmeFile = new URL('../README.md', import.meta.url);
 
   const server = http.createServer((req, res) => {
+    if (logRequests) {
+      const startedAt = Date.now();
+      const method = req.method;
+      // pathname only — never the query string (could carry a search term).
+      const pathname = (req.url ?? '').split('?')[0];
+      res.on('finish', () => {
+        log(`[telegraph] ${method} ${pathname} ${res.statusCode} ${Date.now() - startedAt}ms`);
+      });
+    }
     handle(req, res).catch((err) => {
       const status = Number.isInteger(err?.status) ? err.status : 500;
       // Don't leak internal error text (fs paths, stack messages) to clients.

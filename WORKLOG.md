@@ -11,9 +11,9 @@ Working in small commits so cutoffs lose nothing.
 - **Stripe live**: account/KYC, Payment Links, `whsec_` — yours (DEPLOY step 6).
 
 ## Planned tonight (production hardening + agent features)
-1. [ ] Graceful shutdown (SIGTERM/SIGINT) — clean exit for systemd
-2. [ ] Enrich `GET /v1/health` — version, uptime, agent count, data-writable
-3. [ ] Opt-in request logging (`TELEGRAPH_LOG=1`)
+1. [x] Graceful shutdown (SIGTERM/SIGINT) — clean exit for systemd
+2. [x] Enrich `GET /v1/health` — version, uptime, agent count, data-writable
+3. [x] Opt-in request logging (`TELEGRAPH_LOG=1`)
 4. [ ] Mailbox TTL / expiry (opt-in via `TELEGRAPH_MESSAGE_TTL_DAYS`)
 5. [ ] Directory pagination + total count (backward-compatible)
 6. [ ] `telegraph doctor` CLI + `npm run preflight` deploy check
