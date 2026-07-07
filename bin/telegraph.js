@@ -226,10 +226,20 @@ async function main() {
       server.listen(port, () => {
         out({ ok: true, listening: port, dataDir, admin: Boolean(adminToken), health: `http://127.0.0.1:${port}/v1/health` });
       });
-      process.on('SIGINT', () => {
-        server.close();
-        process.exit(0);
-      });
+      // Graceful shutdown for systemd (SIGTERM) and Ctrl+C (SIGINT): stop
+      // accepting new connections and let in-flight requests finish, then exit.
+      // A force-exit backstop fires if connections won't drain, so the service
+      // manager never has to SIGKILL us (which would risk a half-written file).
+      let shuttingDown = false;
+      const shutdown = () => {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        const force = setTimeout(() => process.exit(1), 10_000);
+        if (typeof force.unref === 'function') force.unref();
+        server.close(() => { clearTimeout(force); process.exit(0); });
+      };
+      process.on('SIGTERM', shutdown);
+      process.on('SIGINT', shutdown);
       return;
     }
     case 'help':
