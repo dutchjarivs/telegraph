@@ -132,9 +132,36 @@ export function createServer({
   const server = http.createServer((req, res) => {
     handle(req, res).catch((err) => {
       const status = Number.isInteger(err?.status) ? err.status : 500;
-      send(res, status, { error: status === 413 ? 'too_large' : 'internal_error', detail: String(err?.message ?? err) });
+      // Don't leak internal error text (fs paths, stack messages) to clients.
+      // 413 carries a safe, useful limit message; everything else is generic
+      // and the detail is logged server-side for the operator.
+      if (status >= 500) {
+        console.error('[telegraph] internal error:', err?.stack ?? err);
+        return send(res, status, { error: 'internal_error' });
+      }
+      send(res, status, { error: status === 413 ? 'too_large' : 'bad_request', detail: String(err?.message ?? err) });
     });
   });
+
+  // Rate-limit state is a per-key sliding window; without eviction the maps
+  // grow for every distinct sender/IP/reporter ever seen (a slow memory-
+  // exhaustion vector). Sweep fully-expired keys on a timer — unref'd so it
+  // never holds the process open, cleared when the server closes.
+  const rateLimiters = [
+    [rateMap, LIMITS.rate.windowMs],
+    [registerMap, LIMITS.registerRate.windowMs],
+    [reportMap, LIMITS.reportRate.windowMs],
+  ];
+  const sweepTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [map, windowMs] of rateLimiters) {
+      for (const [k, hits] of map) {
+        if (!hits.length || now - hits[hits.length - 1] >= windowMs) map.delete(k);
+      }
+    }
+  }, 10 * 60_000);
+  if (typeof sweepTimer.unref === 'function') sweepTimer.unref();
+  server.on('close', () => clearInterval(sweepTimer));
 
   async function handle(req, res) {
     res.setHeader('access-control-allow-origin', '*');
@@ -330,7 +357,12 @@ export function createServer({
     }
 
     if (req.method === 'GET' && url.pathname.startsWith('/v1/agents/')) {
-      const key = decodeURIComponent(url.pathname.slice('/v1/agents/'.length));
+      let key;
+      try {
+        key = decodeURIComponent(url.pathname.slice('/v1/agents/'.length));
+      } catch {
+        return send(res, 400, { error: 'bad_request', hint: 'malformed url encoding' });
+      }
       const agent = key.startsWith('TG-')
         ? store.getAgent(key)
         : store.findByHandle(key.replace(/^@/, ''));
@@ -351,6 +383,12 @@ export function createServer({
           error: 'missing_fields',
           hint: `required: to, from, nonce, ciphertext, ts, sig — missing: ${missing.join(', ')}. See /v1/onboard for the wire format.`,
         });
+      }
+      // Addresses must be well-formed before any lookup — a bare object-key
+      // lookup on values like "__proto__" or "constructor" would otherwise
+      // resolve to a prototype member and slip past the existence checks.
+      if (!TG_ADDRESS_RE.test(to) || !TG_ADDRESS_RE.test(from)) {
+        return send(res, 400, { error: 'bad_address', hint: 'to and from must be TG- addresses' });
       }
       if (typeof ciphertext !== 'string' || ciphertext.length === 0) {
         return send(res, 400, { error: 'bad_ciphertext', hint: 'base64 string from nacl.box' });
@@ -398,7 +436,7 @@ export function createServer({
       const mailbox = store.loadMailbox(to);
       // Duplicate check before the cap check: resending an already-delivered
       // wire into a full mailbox is still a duplicate, not a 507.
-      const id = crypto.createHash('sha256').update(sig).digest('hex').slice(0, 24);
+      const id = wireId(sig);
       if (mailbox.some((m) => m.id === id)) {
         return send(res, 200, { ok: true, id, duplicate: true });
       }
@@ -569,7 +607,7 @@ export function createServer({
         if (!verifyFields(messageFields(e.to, e.from, e.nonce, e.ciphertext, e.ts), e.sig, reported.signPublicKey)) {
           return send(res, 400, { error: 'bad_evidence', hint: "the envelope signature does not verify against the reported sender's key" });
         }
-        wire = { id: crypto.createHash('sha256').update(e.sig).digest('hex').slice(0, 24), from: e.from, ts: e.ts };
+        wire = { id: wireId(e.sig), from: e.from, ts: e.ts };
         evidenceKind = 'signature';
       } else if (typeof messageId === 'string' && messageId) {
         const m = store.loadMailbox(auth.address).find((x) => x.id === messageId);
@@ -957,7 +995,7 @@ export function createServer({
     const address = req.headers['x-telegraph-address'];
     const ts = Number(req.headers['x-telegraph-ts']);
     const sig = req.headers['x-telegraph-sig'];
-    if (typeof address !== 'string' || !ts || typeof sig !== 'string') {
+    if (typeof address !== 'string' || !TG_ADDRESS_RE.test(address) || !ts || typeof sig !== 'string') {
       return { error: 'missing_auth', status: 401 };
     }
     if (!freshTs(ts, LIMITS.authWindowMs)) return { error: 'stale_ts', status: 401 };
@@ -992,7 +1030,13 @@ export function createServer({
   function clientIp(req) {
     if (trustProxy) {
       const xff = req.headers['x-forwarded-for'];
-      if (typeof xff === 'string' && xff.length) return xff.split(',')[0].trim();
+      if (typeof xff === 'string' && xff.length) {
+        // Only honour a plausibly-shaped IP as the first hop; a garbage value
+        // shouldn't become a rate-limit key. (When the relay is truly behind a
+        // proxy the header is trustworthy — see TELEGRAPH_TRUST_PROXY in DEPLOY.)
+        const first = xff.split(',')[0].trim();
+        if (looksLikeIp(first)) return first;
+      }
     }
     return req.socket.remoteAddress ?? 'unknown';
   }
@@ -1056,6 +1100,21 @@ function safeB64Len(s) {
 
 function sha256hex(s) {
   return crypto.createHash('sha256').update(s ?? '').digest('hex');
+}
+
+// Cheap sanity check for an X-Forwarded-For first hop: an IPv4 dotted-quad or
+// anything with a colon (IPv6, incl. ::ffff: mapped). Not full validation —
+// just enough that a junk header value can't become a rate-limit key.
+function looksLikeIp(s) {
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(s) || s.includes(':');
+}
+
+// Wire id: hash the DECODED signature bytes, not the base64 string. A
+// re-encoded signature (Node's base64 decoder ignores trailing whitespace and
+// other stray chars) verifies identically, so hashing the string would let the
+// same wire produce a different id and slip past duplicate suppression.
+function wireId(sig) {
+  return crypto.createHash('sha256').update(fromB64(sig)).digest('hex').slice(0, 24);
 }
 
 // Stripe-Signature header: "t=<unix seconds>,v1=<hex hmac>[,v1=...]"

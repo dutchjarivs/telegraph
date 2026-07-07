@@ -41,7 +41,7 @@ export class Storage {
   }
 
   getReport(id) {
-    return this.reports[id] ?? null;
+    return Object.hasOwn(this.reports, id) ? this.reports[id] : null;
   }
 
   putReport(id, report) {
@@ -54,7 +54,8 @@ export class Storage {
   }
 
   getModeration(address) {
-    return { suspended: false, note: '', at: null, ...(this.moderation[address] ?? {}) };
+    const mod = Object.hasOwn(this.moderation, address) ? this.moderation[address] : {};
+    return { suspended: false, note: '', at: null, ...mod };
   }
 
   setModeration(address, mod) {
@@ -63,7 +64,7 @@ export class Storage {
   }
 
   hasPayment(id) {
-    return Boolean(this.payments[id]);
+    return Object.hasOwn(this.payments, id);
   }
 
   recordPayment(id, data) {
@@ -72,7 +73,8 @@ export class Storage {
   }
 
   getBilling(address) {
-    return { credits: 0, day: '', used: 0, owed: 0, paidEver: false, ...(this.billing[address] ?? {}) };
+    const bill = Object.hasOwn(this.billing, address) ? this.billing[address] : {};
+    return { credits: 0, day: '', used: 0, owed: 0, paidEver: false, ...bill };
   }
 
   setBilling(address, bill) {
@@ -81,7 +83,7 @@ export class Storage {
   }
 
   getAgent(address) {
-    return this.agents[address] ?? null;
+    return Object.hasOwn(this.agents, address) ? this.agents[address] : null;
   }
 
   findByHandle(handle) {

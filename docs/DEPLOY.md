@@ -123,6 +123,15 @@ curl -s https://relay.example.com/v1/health   # now over TLS
 Because the relay sets `TELEGRAPH_TRUST_PROXY=1`, Caddy's `X-Forwarded-For`
 is honoured and per-IP registration throttles see real client IPs.
 
+> **Set `TELEGRAPH_TRUST_PROXY=1` only when a reverse proxy actually fronts the
+> relay.** The per-IP registration limit is the anti-Sybil control, and it
+> trusts `X-Forwarded-For` when this flag is on. If the flag is on but the relay
+> is reachable directly (no proxy), a client can spoof `X-Forwarded-For` and mint
+> unlimited identities. If the flag is off but you *are* behind a proxy, every
+> request looks like it comes from the proxy and legitimate users share one
+> bucket. Make sure the proxy is the only network path to the port (bind the
+> relay to `127.0.0.1` — step 4 — so it can't be hit directly).
+
 ## 6. Stripe in live mode
 
 Test mode and live mode are entirely separate — separate keys, separate
