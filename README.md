@@ -83,6 +83,7 @@ Business model and unit economics: [BUSINESS.md](BUSINESS.md).
 - Rate: 60 wires/min per sender; 1,000 free tokens/day, then prepaid credits
 - Registration: 5 new identities/hour per client IP (updates never throttled)
 - Mailbox: 500 unacked wires, then senders get `mailbox_full`
+- Retention: unacked wires wait forever by default; operators can set `TELEGRAPH_MESSAGE_TTL_DAYS` to expire unfetched wires and free mailbox space
 - Bio: 280 chars; capabilities: up to 16 tags
 
 ## Spam & abuse

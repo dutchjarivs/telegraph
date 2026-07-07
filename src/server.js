@@ -23,6 +23,7 @@ export const DEFAULT_LIMITS = {
   authWindowMs: 5 * 60_000,
   msgWindowMs: 10 * 60_000,
   mailboxCap: 500,
+  messageTtlMs: 0, // 0 = wires never expire; > 0 drops mailbox wires older than this
   rate: { windowMs: 60_000, max: 60 },
   registerRate: { windowMs: 60 * 60_000, max: 5 }, // new identities per client IP per hour (anti-sybil)
   maxCapabilities: 16,
@@ -89,7 +90,21 @@ export function createServer({
   log = console.log,
 } = {}) {
   const LIMITS = { ...DEFAULT_LIMITS, ...limits };
+  // Env-configured mailbox TTL (in days), unless the caller set it explicitly.
+  const envTtlDays = Number(process.env.TELEGRAPH_MESSAGE_TTL_DAYS);
+  if (!('messageTtlMs' in limits) && envTtlDays > 0) LIMITS.messageTtlMs = envTtlDays * 86_400_000;
   const store = new Storage(dataDir);
+  // With a TTL set, expired wires are pruned lazily on every mailbox load —
+  // they stop being visible, deliverable-against (cap space frees up), and
+  // reportable the moment they age out, with no background sweeper to run.
+  const loadMailbox = (address) => {
+    const mailbox = store.loadMailbox(address);
+    if (!(LIMITS.messageTtlMs > 0)) return mailbox;
+    const cutoff = Date.now() - LIMITS.messageTtlMs;
+    const fresh = mailbox.filter((m) => m.receivedAt >= cutoff);
+    if (fresh.length !== mailbox.length) store.saveMailbox(address, fresh);
+    return fresh;
+  };
   const rateMap = new Map();
   const registerMap = new Map();
   const reportMap = new Map();
@@ -459,7 +474,7 @@ export function createServer({
       if (!allowRate(from)) {
         return send(res, 429, { error: 'rate_limited', hint: `max ${LIMITS.rate.max} wires/min` });
       }
-      const mailbox = store.loadMailbox(to);
+      const mailbox = loadMailbox(to);
       // Duplicate check before the cap check: resending an already-delivered
       // wire into a full mailbox is still a duplicate, not a 507.
       const id = wireId(sig);
@@ -525,7 +540,7 @@ export function createServer({
     if (route === 'GET /v1/inbox') {
       const auth = checkAuth(req, url.pathname, sha256hex(''));
       if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
-      const mailbox = store.loadMailbox(auth.address);
+      const mailbox = loadMailbox(auth.address);
       const messages = mailbox.map(({ senderRecord, ...m }) => ({
         ...m,
         // Live record first (fresh bio/handle), delivery-time snapshot as the
@@ -556,7 +571,7 @@ export function createServer({
         return send(res, 400, { error: 'bad_ids', hint: 'body: {"ids": ["..."]}' });
       }
       const ids = new Set(body.ids);
-      const mailbox = store.loadMailbox(auth.address);
+      const mailbox = loadMailbox(auth.address);
       const keep = mailbox.filter((m) => !ids.has(m.id));
       store.saveMailbox(auth.address, keep);
       return send(res, 200, { ok: true, removed: mailbox.length - keep.length, remaining: keep.length });
@@ -622,7 +637,7 @@ export function createServer({
         wire = { id: wireId(e.sig), from: e.from, ts: e.ts };
         evidenceKind = 'signature';
       } else if (typeof messageId === 'string' && messageId) {
-        const m = store.loadMailbox(auth.address).find((x) => x.id === messageId);
+        const m = loadMailbox(auth.address).find((x) => x.id === messageId);
         if (!m) {
           return send(res, 404, {
             error: 'message_not_found',
@@ -784,7 +799,7 @@ export function createServer({
       const today = new Date().toISOString().slice(0, 10);
       const agents = store.listAgents().map((a) => {
         const bill = store.getBilling(a.address);
-        const mailbox = store.loadMailbox(a.address);
+        const mailbox = loadMailbox(a.address);
         const standing = reportStats(a.address);
         return {
           address: a.address,
@@ -821,6 +836,7 @@ export function createServer({
         limits: {
           freeDailyTokens: LIMITS.freeDailyTokens,
           mailboxCap: LIMITS.mailboxCap,
+          messageTtlMs: LIMITS.messageTtlMs,
         },
         pricing: { currency: PRICING.currency, processor: PRICING.processor, usdPerMillionTokens: PRICING.usdPerMillionTokens },
         totals: {
@@ -861,7 +877,7 @@ export function createServer({
         return send(res, 400, { error: 'bad_address', hint: 'exact TG- address required (handles are not accepted here)' });
       }
       const bill = store.getBilling(address);
-      const mailboxCount = store.loadMailbox(address).length;
+      const mailboxCount = loadMailbox(address).length;
       const removed = store.removeAgent(address);
       if (!removed) return send(res, 404, { error: 'unknown_agent' });
       return send(res, 200, {
