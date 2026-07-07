@@ -28,7 +28,9 @@ try { if (localStorage.getItem('tg_theme') === 'dark') document.documentElement.
   --wire-text: #f0e6cd;
   --ok: #3e6b34;
   --line: #262014;           /* structural lines — tracks ink in light mode */
+  --line-strong: #262014;    /* primary framing; stays ink in light, goes cream in dark */
   --press: #262014;          /* letterpress shadow */
+  --press-strong: #262014;
   --on-amber: #262014;       /* text on brass fills — constant in both modes */
   --on-wax: #faf5e8;         /* text on sealing wax — constant in both modes */
   --shadow: rgba(38,32,20,0.85);
@@ -49,8 +51,12 @@ html[data-theme="dark"] {
   --wire-night: #100d09;
   --wire-text: #ece1c6;
   --ok: #7fb571;
-  --line: #ece1c6;           /* cream outlines — print-on-dark, per Tristan */
-  --press: #ece1c6;
+  /* Dark mode: secondary chrome recedes in dark bronze; only the primary
+     framing (masthead, hero telegram, section rules, brand + hero CTAs) is cream. */
+  --line: #6b5836;           /* dark bronze — secondary outlines */
+  --line-strong: #ece1c6;    /* cream — primary framing only, per Tristan */
+  --press: #6b5836;
+  --press-strong: #ece1c6;
   --shadow: rgba(0,0,0,0.9);
   --grain: rgba(236,225,198,0.05);
 }
@@ -81,7 +87,7 @@ b, strong { font-weight: 700; }
 .morse s { width: 12px; } /* letter gap */
 
 /* ═══ MASTHEAD ═══ */
-.topbar { background: var(--paper); border-bottom: 3px double var(--line); position: sticky; top: 0; z-index: 20; }
+.topbar { background: var(--paper); border-bottom: 3px double var(--line-strong); position: sticky; top: 0; z-index: 20; }
 .topbar .inner { display: flex; align-items: center; justify-content: space-between; height: 58px; gap: 10px; }
 .topleft { display: flex; align-items: center; gap: 14px; }
 .logo {
@@ -90,9 +96,9 @@ b, strong { font-weight: 700; }
 }
 .logo:hover { color: var(--ink); }
 .logo .mark {
-  width: 30px; height: 30px; flex-shrink: 0; border: 2.5px solid var(--line); background: var(--amber-fill);
+  width: 30px; height: 30px; flex-shrink: 0; border: 2.5px solid var(--line-strong); background: var(--amber-fill);
   display: flex; align-items: center; justify-content: center; color: var(--on-amber);
-  font-size: 13px; letter-spacing: 0; box-shadow: 2px 2px 0 var(--press);
+  font-size: 13px; letter-spacing: 0; box-shadow: 2px 2px 0 var(--press-strong);
 }
 .owner-login {
   font-family: var(--font-wire); font-size: 12.5px; font-weight: 700; letter-spacing: 0.08em;
@@ -109,11 +115,11 @@ b, strong { font-weight: 700; }
 }
 .topnav a:hover { color: var(--ink); text-decoration: underline; text-decoration-color: var(--amber); }
 .topnav a.cta-mini {
-  color: var(--on-amber); background: var(--amber-fill); border: 2px solid var(--line);
-  box-shadow: 2px 2px 0 var(--press); margin-left: 8px; padding: 7px 13px;
+  color: var(--on-amber); background: var(--amber-fill); border: 2px solid var(--line-strong);
+  box-shadow: 2px 2px 0 var(--press-strong); margin-left: 8px; padding: 7px 13px;
   transition: transform 0.1s, box-shadow 0.1s;
 }
-.topnav a.cta-mini:hover { text-decoration: none; transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--press); color: var(--on-amber); }
+.topnav a.cta-mini:hover { text-decoration: none; transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--press-strong); color: var(--on-amber); }
 .theme-btn {
   width: 34px; height: 34px; margin-left: 10px; flex-shrink: 0; cursor: pointer;
   font-size: 15px; line-height: 1; color: var(--ink);
@@ -142,20 +148,20 @@ h1 .gold { color: var(--amber); }
 .btn {
   display: inline-block; font-family: var(--font-wire); font-weight: 700; font-size: 14.5px;
   letter-spacing: 0.06em; text-transform: uppercase; text-decoration: none;
-  padding: 13px 22px; border: 2.5px solid var(--line); cursor: pointer;
+  padding: 13px 22px; border: 2.5px solid var(--line-strong); cursor: pointer;
   transition: transform 0.1s, box-shadow 0.1s;
 }
-.btn-primary { background: var(--amber-fill); color: var(--on-amber); box-shadow: 4px 4px 0 var(--press); }
+.btn-primary { background: var(--amber-fill); color: var(--on-amber); box-shadow: 4px 4px 0 var(--press-strong); }
 .btn-primary:hover { color: var(--on-amber); }
-.btn-secondary { background: var(--paper-bright); color: var(--ink); box-shadow: 4px 4px 0 var(--press); }
+.btn-secondary { background: var(--paper-bright); color: var(--ink); box-shadow: 4px 4px 0 var(--press-strong); }
 .btn-secondary:hover { color: var(--ink); }
-.btn:hover { transform: translate(-2px,-2px); box-shadow: 6px 6px 0 var(--press); }
-.btn:active { transform: translate(2px,2px); box-shadow: 1px 1px 0 var(--press); }
+.btn:hover { transform: translate(-2px,-2px); box-shadow: 6px 6px 0 var(--press-strong); }
+.btn:active { transform: translate(2px,2px); box-shadow: 1px 1px 0 var(--press-strong); }
 
 /* the telegram blank */
 .telegram {
   max-width: 780px; margin: 0 auto; text-align: left; position: relative;
-  background: var(--paper-bright); border: 2.5px solid var(--line); box-shadow: 6px 6px 0 var(--shadow);
+  background: var(--paper-bright); border: 2.5px solid var(--line-strong); box-shadow: 6px 6px 0 var(--shadow);
 }
 .telegram .form-head {
   display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap;
@@ -198,7 +204,7 @@ h1 .gold { color: var(--amber); }
 section { padding: 64px 0 8px; }
 h2 {
   font-family: var(--font-wire); font-size: 28px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
-  border-bottom: 3px double var(--line); display: inline-block; padding-bottom: 6px; margin-bottom: 10px;
+  border-bottom: 3px double var(--line-strong); display: inline-block; padding-bottom: 6px; margin-bottom: 10px;
 }
 .lead { max-width: 640px; color: var(--ink-soft); margin-bottom: 30px; font-size: 17px; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }

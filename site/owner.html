@@ -28,7 +28,9 @@ try { if (localStorage.getItem('tg_theme') === 'dark') document.documentElement.
   --wire-text: #f0e6cd;
   --ok: #3e6b34;
   --line: #262014;           /* structural lines — tracks ink in light mode */
+  --line-strong: #262014;    /* primary framing; stays ink in light, goes cream in dark */
   --press: #262014;          /* letterpress shadow */
+  --press-strong: #262014;
   --on-amber: #262014;       /* text on brass fills — constant in both modes */
   --on-wax: #faf5e8;         /* text on sealing wax — constant in both modes */
   --shadow: rgba(38,32,20,0.85);
@@ -49,8 +51,12 @@ html[data-theme="dark"] {
   --wire-night: #100d09;
   --wire-text: #ece1c6;
   --ok: #7fb571;
-  --line: #ece1c6;           /* cream outlines — print-on-dark */
-  --press: #ece1c6;
+  /* Dark mode: secondary chrome recedes in dark bronze; only the primary
+     framing (masthead, section rules, brand marks, focal cards) is cream. */
+  --line: #6b5836;           /* dark bronze — secondary outlines */
+  --line-strong: #ece1c6;    /* cream — primary framing only */
+  --press: #6b5836;
+  --press-strong: #ece1c6;
   --shadow: rgba(0,0,0,0.9);
   --grain: rgba(236,225,198,0.05);
 }
@@ -71,10 +77,10 @@ code { font-family: var(--font-wire); }
 .wrap { max-width: 900px; margin: 0 auto; padding: 0 20px; }
 
 /* ═══ MASTHEAD ═══ */
-.topbar { background: var(--paper); border-bottom: 3px double var(--line); position: sticky; top: 0; z-index: 20; }
+.topbar { background: var(--paper); border-bottom: 3px double var(--line-strong); position: sticky; top: 0; z-index: 20; }
 .topbar .inner { display: flex; align-items: center; justify-content: space-between; height: 58px; gap: 10px; }
 .logo { display: flex; align-items: center; gap: 10px; font-family: var(--font-wire); font-weight: 700; font-size: 16px; letter-spacing: 0.14em; }
-.logo .mark { width: 30px; height: 30px; flex-shrink: 0; border: 2.5px solid var(--line); background: var(--amber-fill); display: flex; align-items: center; justify-content: center; color: var(--on-amber); font-size: 12px; letter-spacing: 0; box-shadow: 2px 2px 0 var(--press); }
+.logo .mark { width: 30px; height: 30px; flex-shrink: 0; border: 2.5px solid var(--line-strong); background: var(--amber-fill); display: flex; align-items: center; justify-content: center; color: var(--on-amber); font-size: 12px; letter-spacing: 0; box-shadow: 2px 2px 0 var(--press-strong); }
 .logo .op { color: var(--ink-soft); }
 .topbar .right { display: flex; align-items: center; gap: 8px; }
 .updated { font-family: var(--font-wire); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
@@ -96,9 +102,9 @@ code { font-family: var(--font-wire); }
 
 /* ═══ IDENTITY GATE — the counter window ═══ */
 .gate { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
-.gate .card { width: 100%; max-width: 500px; background: var(--paper-bright); border: 2.5px solid var(--line); box-shadow: 6px 6px 0 var(--shadow); }
+.gate .card { width: 100%; max-width: 500px; background: var(--paper-bright); border: 2.5px solid var(--line-strong); box-shadow: 6px 6px 0 var(--shadow); }
 .gate h1 { font-family: var(--font-wire); font-size: 21px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; margin: 14px 0 6px; text-align: center; }
-.gate .mark-lg { width: 52px; height: 52px; border: 2.5px solid var(--line); background: var(--amber-fill); display: flex; align-items: center; justify-content: center; color: var(--on-amber); font-family: var(--font-wire); font-size: 20px; font-weight: 800; margin: 0 auto; box-shadow: 3px 3px 0 var(--press); }
+.gate .mark-lg { width: 52px; height: 52px; border: 2.5px solid var(--line-strong); background: var(--amber-fill); display: flex; align-items: center; justify-content: center; color: var(--on-amber); font-family: var(--font-wire); font-size: 20px; font-weight: 800; margin: 0 auto; box-shadow: 3px 3px 0 var(--press-strong); }
 .gate p { color: var(--ink-soft); font-size: 13.5px; margin-bottom: 16px; text-align: center; }
 .gate textarea { width: 100%; height: 110px; padding: 11px 14px; border: 2px solid var(--line); background: var(--paper); color: var(--ink); font-family: var(--font-wire); font-size: 11.5px; resize: vertical; margin-bottom: 12px; }
 .gate textarea:focus { border-color: var(--amber); outline: none; }
@@ -136,7 +142,7 @@ code { font-family: var(--font-wire); }
 .btn-report { color: var(--wax); flex-shrink: 0; }
 
 /* ═══ CONVERSATIONS — a stack of received telegrams ═══ */
-section h2 { font-family: var(--font-wire); font-size: 16px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; border-bottom: 3px double var(--line); display: inline-block; padding-bottom: 4px; margin-bottom: 12px; }
+section h2 { font-family: var(--font-wire); font-size: 16px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; border-bottom: 3px double var(--line-strong); display: inline-block; padding-bottom: 4px; margin-bottom: 12px; }
 .thread { background: var(--paper-bright); border: 2px solid var(--line); box-shadow: 3px 3px 0 var(--shadow); margin-bottom: 18px; }
 .thread .head { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 2px solid var(--line); }
 .thread .head .who { font-family: var(--font-wire); font-weight: 700; font-size: 13.5px; letter-spacing: 0.03em; }
@@ -160,14 +166,14 @@ footer { color: var(--ink-soft); font-size: 12.5px; padding: 14px 0 44px; border
 .morse .dah { width: 14px; }
 .morse s { width: 12px; }
 
-#toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(90px); background: var(--wire-night); color: var(--wire-text); border: 2px solid var(--line); box-shadow: 3px 3px 0 var(--shadow); padding: 10px 20px; font-family: var(--font-wire); font-size: 12.5px; font-weight: 700; transition: transform 0.25s; z-index: 50; max-width: 90vw; }
+#toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(90px); background: var(--wire-night); color: var(--wire-text); border: 2px solid var(--line-strong); box-shadow: 3px 3px 0 var(--shadow); padding: 10px 20px; font-family: var(--font-wire); font-size: 12.5px; font-weight: 700; transition: transform 0.25s; z-index: 50; max-width: 90vw; }
 #toast.show { transform: translateX(-50%) translateY(0); }
 #toast.bad { background: var(--wax); color: var(--on-wax); }
 
 /* ═══ REPORT MODAL — a sealed complaint form ═══ */
 .modal-overlay { position: fixed; inset: 0; z-index: 40; background: rgba(38,32,20,0.55); display: flex; align-items: center; justify-content: center; padding: 20px; }
 html[data-theme="dark"] .modal-overlay { background: rgba(0,0,0,0.65); }
-.modal { width: 100%; max-width: 480px; background: var(--paper-bright); border: 2.5px solid var(--line); box-shadow: 6px 6px 0 var(--shadow); }
+.modal { width: 100%; max-width: 480px; background: var(--paper-bright); border: 2.5px solid var(--line-strong); box-shadow: 6px 6px 0 var(--shadow); }
 .modal h3 { font-family: var(--font-wire); font-size: 16px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
 .modal .addr { font-family: var(--font-wire); font-size: 10.5px; color: var(--ink-soft); margin: 2px 0 12px; }
 .modal .note { border: 2px solid var(--line); background: var(--paper-deep); padding: 9px 12px; font-size: 12.5px; color: var(--ink-soft); margin-bottom: 14px; }
