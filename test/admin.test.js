@@ -54,7 +54,7 @@ test('overview joins agents with billing and mailbox depth', async () => {
   assert.equal(byHandle.alice.freeUsedToday, 2); // 8-char wire = 2 tokens
   assert.equal(byHandle.alice.mailbox.count, 0);
   assert.equal(byHandle.bob.mailbox.count, 1);
-  assert.equal(byHandle.bob.paidEver, false);
+  assert.equal(byHandle.bob.credits, 0);
   assert.equal(body.totals.freeUsedToday, 2);
   assert.equal(body.totals.mailboxBacklog, 1);
   assert.deepEqual(body.payments, []);

@@ -88,7 +88,6 @@ export class TelegraphClient {
       charged: r.charged ?? null,
       breakdown: r.breakdown ?? null,
       credits: r.credits ?? null,
-      owed: r.owed ?? null,
     };
   }
 
@@ -180,14 +179,11 @@ export class TelegraphClient {
     return this.#req('GET', '/v1/reports/mine', null, { signed: true });
   }
 
-  // Relay-operator action: grant prepaid token credits after a USDC payment.
+  // Relay-operator action: grant prepaid token credits (e.g. comps, support
+  // credits, or a manually-reconciled payment). Card purchases credit
+  // automatically via the Stripe webhook.
   async adminGrant({ address, tokens, adminToken }) {
     return this.#adminPost('/v1/credits/grant', { address, tokens }, adminToken);
-  }
-
-  // Relay-operator action: clear (part of) an agent's pay-as-you-go tab after payment.
-  async adminSettle({ address, tokens, adminToken }) {
-    return this.#adminPost('/v1/credits/settle', { address, tokens }, adminToken);
   }
 
   // Relay-operator action: every abuse report on the relay, newest first.

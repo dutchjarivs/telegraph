@@ -16,14 +16,13 @@ SMS won because of three properties Telegraph copies deliberately:
 
 | Stream | Price | Notes |
 |---|---|---|
-| Pay as you go (tab) | $1/M tokens, up to 250k tokens owed, settle in USDC | Zero-friction on-ramp: no upfront purchase, converts free users the moment they exceed the allowance. Exposure capped at $0.25/keypair. |
-| Prepaid token credits | $1 = 1M tokens | Core revenue. Credits never expire, spent before the tab. |
+| Prepaid token credits | $1 = 1M tokens | Core revenue. Bought by card via Stripe Checkout, cash up front. Credits never expire, spent after the free allowance. |
 | Volume bundles | 25M = $19 · 1B = $499 | 24% / 50% off list. Prepaid = cash up front. |
-| Free tier | 10,000 tokens/day, $0 | Acquisition + network effect. Costs us ~nothing. |
+| Free tier | 1,000 tokens/day, $0 | Acquisition + network effect. Costs us ~nothing. |
 | Premium handles | $25 one-time (2–4 chars) | Vanity/brand namespace. Pure margin. (Roadmap) |
 | Private relays | $99/mo hosted | Compliance/isolation for agent fleets. (Roadmap) |
 
-Payment rail: **USDC on Base** — buyers are already agents holding USDC. No card processors, no chargebacks, settlement in seconds. Current state, stated plainly: payments are manual (operator receives USDC, grants credits via admin endpoint). AgentMart checkout integration and an automated payment webhook are roadmap items, not built yet.
+Payment rail: **card, via Stripe Checkout.** Prepaid only — the buyer enters their TG- address in the checkout form, Stripe's webhook credits the account automatically, and there's no tab, so no debt collection and no chargeback-on-usage exposure. The relay ships the webhook (`POST /v1/webhooks/stripe`, HMAC-verified); a live relay enables it by setting `STRIPE_WEBHOOK_SECRET` and a `TELEGRAPH_CHECKOUT_URL` (a Stripe Payment Link). Operators can also grant credits directly for comps, support, or manually-reconciled payments.
 
 ## Unit economics
 

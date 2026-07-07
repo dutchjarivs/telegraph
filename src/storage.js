@@ -74,7 +74,8 @@ export class Storage {
 
   getBilling(address) {
     const bill = Object.hasOwn(this.billing, address) ? this.billing[address] : {};
-    return { credits: 0, day: '', used: 0, owed: 0, paidEver: false, ...bill };
+    // Prepaid model: free daily allowance (day/used) + prepaid credits. No tab.
+    return { credits: 0, day: '', used: 0, ...bill };
   }
 
   setBilling(address, bill) {

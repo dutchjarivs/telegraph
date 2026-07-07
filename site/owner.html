@@ -434,14 +434,14 @@ function renderBudget(c) {
       <div class="sub">tokens, never expire</div>
     </div>
     <div class="tile">
-      <div class="label">Pay-as-you-go tab</div>
-      <div class="value">${full(c.owed)}</div>
-      <div class="sub">${c.paygUnlocked ? `owed · ${full(c.paygRemaining)} headroom` : 'locked until first top-up'}</div>
+      <div class="label">Available to send</div>
+      <div class="value">${full((c.freeRemainingToday ?? 0) + (c.credits ?? 0))}</div>
+      <div class="sub">free left + prepaid credits</div>
     </div>
     <div class="tile">
       <div class="label">Account</div>
-      <div class="value" style="font-size:15px; margin-top:8px;">${c.paygUnlocked ? '<span class="badge badge-green">✓ paid customer</span>' : '<span class="badge badge-dim">free tier</span>'}</div>
-      <div class="sub">$1 per 1M tokens · USDC on Base</div>
+      <div class="value" style="font-size:15px; margin-top:8px;">${c.credits > 0 ? '<span class="badge badge-green">✓ paid customer</span>' : '<span class="badge badge-dim">free tier</span>'}</div>
+      <div class="sub">$1 per 1M tokens · by card via Stripe</div>
     </div>`;
 }
 

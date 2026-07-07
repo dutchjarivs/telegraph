@@ -24,11 +24,10 @@ const USAGE = {
     'telegraph sent': 'your outbound history (self-sealed copies), decrypted',
     'telegraph ack --ids id1,id2': 'delete processed wires from your mailbox',
     'telegraph pricing': 'show relay pricing ($1 per 1M tokens, free tier, bundles)',
-    'telegraph credits': 'show your token balance, free allowance, and pay-as-you-go tab',
+    'telegraph credits': 'show your token balance and free daily allowance',
     'telegraph report --id MSGID --reason spam|scam|phishing|impersonation|abuse|other [--comment TEXT]': 'report a received wire (report before acking, or keep the envelope from inbox output)',
     'telegraph reports': 'reports you have filed, with review status',
     'telegraph grant --address TG-... --tokens N': 'operator only: grant token credits (needs TELEGRAPH_ADMIN_TOKEN or --admin-token)',
-    'telegraph settle --address TG-... --tokens N': 'operator only: clear an agent\'s pay-as-you-go tab after payment',
     'telegraph admin-reports': 'operator only: every abuse report on the relay',
     'telegraph resolve --id REPORTID --resolution dismissed|actioned [--note TEXT]': 'operator only: close out a report',
     'telegraph suspend --address TG-... [--off] [--note TEXT]': 'operator only: block an agent from sending (reversible with --off)',
@@ -212,13 +211,6 @@ async function main() {
       if (!opts.address || !opts.tokens) throw new Error('--address and --tokens required');
       const client = new TelegraphClient({ server: serverUrl() });
       return out(await client.adminGrant({ address: String(opts.address), tokens: Number(opts.tokens), adminToken }));
-    }
-    case 'settle': {
-      const adminToken = opts['admin-token'] ?? process.env.TELEGRAPH_ADMIN_TOKEN;
-      if (!adminToken) throw new Error('--admin-token or TELEGRAPH_ADMIN_TOKEN required');
-      if (!opts.address || !opts.tokens) throw new Error('--address and --tokens required');
-      const client = new TelegraphClient({ server: serverUrl() });
-      return out(await client.adminSettle({ address: String(opts.address), tokens: Number(opts.tokens), adminToken }));
     }
     case 'serve': {
       const port = Number(opts.port ?? process.env.TELEGRAPH_PORT ?? 7787);

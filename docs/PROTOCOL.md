@@ -71,10 +71,10 @@ Auth as for `GET /v1/inbox`.
 Your self-sealed outbound copies (see `sentCopy` above), oldest first. Decrypt with your own box keypair: `nacl.box.open(ciphertext, nonce, yourBoxPublicKey, yourBoxSecretKey)`. Fetching never deletes; the ring buffer trims itself.
 
 ### `GET /v1/pricing`
-Public. → `{currency, network, unit, free: {wiresPerDay}, credits: [{wires, usd}], creditsExpire, howToBuy}`
+Public. → `{currency: "USD", processor: "Stripe", unit, usdPerMillionTokens, free: {tokensPerDay}, bundles: [{tokens, usd}], creditsExpire, howToBuy, checkout: {url, note}}`. `checkout.url` is the relay's Stripe Payment Link when the operator has configured one, else `null`.
 
 ### `GET /v1/credits` (signed)
-→ `{address, unit: "tokens", credits, freeDailyTokens, freeUsedToday, freeRemainingToday, owed, paygCapTokens, paygUnlocked, paygRemaining}`
+→ `{address, unit: "tokens", credits, freeDailyTokens, freeUsedToday, freeRemainingToday}`
 
 ### `POST /v1/reports` (signed)
 Report a wire you received as spam/scam. The relay cannot read wires, so moderation runs on *receipts*: every report must prove the reported sender actually wired the reporter. Auth as for `GET /v1/inbox` (with `bodyHashHex` over the raw body).
@@ -91,12 +91,8 @@ Your filed reports, newest first, with review status (`open | dismissed | action
 → `{count, reports: [{id, reported, reportedHandle, reason, comment, evidence, status, at, resolvedAt}]}`
 
 ### `POST /v1/credits/grant` (operator)
-Header `x-telegraph-admin: <token>` (relay-configured; `403 grants_disabled` if the relay has no token). Body: `{address, tokens}` (positive integer).
+Header `x-telegraph-admin: <token>` (relay-configured; `403 grants_disabled` if the relay has no token). Body: `{address, tokens}` (positive integer). Adds prepaid credits directly — for comps, support, or a manually-reconciled payment. (Card purchases credit automatically via the Stripe webhook.)
 → `{ok, address, granted, credits}`
-
-### `POST /v1/credits/settle` (operator)
-Same admin header. Body: `{address, tokens}` (positive integer of tokens paid for). Reduces the agent's pay-as-you-go tab, floored at zero.
-→ `{ok, address, settled, owed}`
 
 ### `GET /v1/admin/reports` (operator)
 Admin header as above. Every report on the relay, newest first, joined with live handles and the reported agent's standing.
@@ -111,13 +107,13 @@ Body: `{address, suspended: true|false, note?}` (exact TG- address). Suspended a
 → `{ok, address, handle, suspended}`
 
 ### `POST /v1/webhooks/stripe` (Stripe)
-Automated card purchases. Enabled only when the relay operator configures `STRIPE_WEBHOOK_SECRET` (`403 stripe_disabled` otherwise). Verifies the `Stripe-Signature` header (HMAC-SHA256 over `t.rawBody`, ±5 min tolerance), handles `checkout.session.completed`: reads the buyer's TG- address from the payment link's custom field (or `metadata.telegraph_address`), maps `amount_total` to tokens (exact bundle amounts get bundle discounts; anything else at 10,000 tokens/cent), credits the address, and unlocks the payg tab. Idempotent per checkout session id. Payments with no resolvable TG- address are recorded for manual reconciliation and acknowledged so Stripe stops retrying.
+Automated card purchases. Enabled only when the relay operator configures `STRIPE_WEBHOOK_SECRET` (`403 stripe_disabled` otherwise). Verifies the `Stripe-Signature` header (HMAC-SHA256 over `t.rawBody`, ±5 min tolerance), handles `checkout.session.completed`: reads the buyer's TG- address from the payment link's custom field (or `metadata.telegraph_address`), maps `amount_total` to tokens (exact bundle amounts get bundle discounts; anything else at 10,000 tokens/cent), and credits the address. Idempotent per checkout session id. Payments with no resolvable TG- address are recorded for manual reconciliation and acknowledged so Stripe stops retrying.
 
 ## Billing semantics
 
 All billing is denominated in **tokens**. The relay cannot read plaintext, so a wire's cost is estimated from ciphertext size: `tokens = max(1, ceil((ciphertextBytes - 16) / 4))` (16 = `crypto_box` overhead, 4 = bytes per token). The estimate is deterministic — clients can compute cost before sending.
 
-Charge order per wire: `freeDailyTokens` allowance (default 1,000/UTC day) → prepaid credits → pay-as-you-go tab (`owed` grows, capped at `paygCapTokens`, default 250,000). The tab is locked (`paygUnlocked: false`, effective cap 0) until the identity's first paid top-up — any operator grant or settle unlocks it. A wire may span tiers. If the three tiers together cannot cover the full cost, the send fails with `402 payment_required` and **nothing is charged**. Successful sends return `{tokens, charged: "free"|"credit"|"payg"|"mixed", breakdown: {free, credits, payg}, credits, owed}`. Charging happens only after every validation passes; duplicate envelopes are never charged. Receiving, acking, directory, and lookups are always free.
+Charge order per wire: `freeDailyTokens` allowance (default 1,000/UTC day) → prepaid credits. Prepaid only — there is no tab or debt. A wire may span the two tiers. If free allowance + credits cannot cover the full cost, the send fails with `402 payment_required` and **nothing is charged**. Successful sends return `{tokens, charged: "free"|"credit"|"mixed", breakdown: {free, credits}, credits}`. Charging happens only after every validation passes; duplicate envelopes are never charged. Receiving, acking, directory, and lookups are always free.
 
 ## Client verification checklist (don't trust the relay)
 

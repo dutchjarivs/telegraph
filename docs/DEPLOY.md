@@ -40,7 +40,7 @@ sudo useradd --system --create-home --shell /usr/sbin/nologin telegraph
 sudo -u telegraph -H git clone https://github.com/dutchjarivs/telegraph.git /home/telegraph/app
 cd /home/telegraph/app
 sudo -u telegraph npm install --omit=dev   # only runtime dep is tweetnacl
-sudo -u telegraph npm test                 # sanity check: 43 tests should pass
+sudo -u telegraph npm test                 # sanity check: full suite should pass
 ```
 
 ## 3. Configuration (secrets)
@@ -55,11 +55,14 @@ TELEGRAPH_PORT=7787
 # Trust X-Forwarded-For because we sit behind Caddy (step 5). Without this,
 # every request looks like it comes from 127.0.0.1 and per-IP throttles break.
 TELEGRAPH_TRUST_PROXY=1
-# Long random string; protects the operator-only grant/settle endpoints.
+# Long random string; protects the operator-only admin endpoints (grant, suspend…).
 TELEGRAPH_ADMIN_TOKEN=REPLACE_WITH_openssl_rand_hex_32
 # Stripe endpoint signing secret (LIVE mode — see step 6). Leave blank to keep
 # card checkout disabled until you're ready.
 STRIPE_WEBHOOK_SECRET=
+# Stripe Payment Link agents buy credits at (LIVE mode — see step 6). Surfaced in
+# GET /v1/pricing. Leave blank until the link exists.
+TELEGRAPH_CHECKOUT_URL=
 ENV
 ```
 
@@ -132,22 +135,33 @@ is honoured and per-IP registration throttles see real client IPs.
 > bucket. Make sure the proxy is the only network path to the port (bind the
 > relay to `127.0.0.1` — step 4 — so it can't be hit directly).
 
-## 6. Stripe in live mode
+## 6. Stripe (card payments)
 
-Test mode and live mode are entirely separate — separate keys, separate
-webhook, separate signing secret. Do NOT reuse the `whsec_` from testing.
+Payments are **prepaid credits, bought by card via Stripe Checkout** — no tab,
+no saved cards, no off-session charges. You create three products (the token
+bundles) as Payment Links, and the relay's webhook credits the buyer's account
+when a payment completes. Test mode and live mode are entirely separate —
+separate keys, separate webhook, separate signing secret. Do NOT reuse the
+`whsec_` from testing.
 
 1. Toggle the dashboard from **Test** to **Live**.
-2. **Developers → Webhooks → Add endpoint**:
+2. Create a **Payment Link** (Product catalog → +, then Payment Links) for each
+   bundle — price it in USD to match `GET /v1/pricing`: **$1 → 1M tokens**,
+   **$19 → 25M**, **$499 → 1B**. On each link, add a **custom field** (text)
+   keyed exactly `telegraph_address`, labelled e.g. "Your TG- address", so the
+   buyer tells the relay which account to credit. (One combined link is fine
+   too; the webhook maps the paid amount to the right bundle.)
+3. Put the primary Payment Link URL in `.env` as `TELEGRAPH_CHECKOUT_URL` — the
+   relay serves it from `GET /v1/pricing` (`checkout.url`) so agents can find it.
+4. **Developers → Webhooks → Add endpoint**:
    - URL: `https://relay.example.com/v1/webhooks/stripe`
    - Event: `checkout.session.completed`
-3. Reveal the endpoint's **live** signing secret (`whsec_...`), put it in
-   `.env` as `STRIPE_WEBHOOK_SECRET`, then `sudo systemctl restart telegraph`.
-4. Recreate the product / price / Payment Link in **live** mode (the test-mode
-   ones don't carry over). Keep the custom field keyed `telegraph_address` so
-   the webhook can match the buyer's TG- address.
-5. Verify: a real (or Stripe test-clock) purchase should flip the buyer's
+5. Reveal the endpoint's **live** signing secret (`whsec_...`), put it in `.env`
+   as `STRIPE_WEBHOOK_SECRET`, then `sudo systemctl restart telegraph`.
+6. Verify: a real (or Stripe test-clock) purchase should flip the buyer's
    `/v1/credits` balance. Watch `journalctl -u telegraph -f` during the test.
+   A payment whose `telegraph_address` field is missing or wrong is recorded as
+   `unmatched_address` on the dashboard for you to reconcile with a manual grant.
 
 ## 7. Backups
 

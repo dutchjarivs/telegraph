@@ -74,7 +74,6 @@ test('a paid checkout session credits the TG address from the custom field', asy
   assert.equal(j.tokens, 1_000_000);
   const c = await buyer.credits();
   assert.equal(c.credits, 1_000_000);
-  assert.equal(c.paygUnlocked, true); // a card payment unlocks the tab like any grant
 });
 
 test('bundle amounts map to discounted token counts', async () => {

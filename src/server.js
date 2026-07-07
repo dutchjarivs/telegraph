@@ -28,7 +28,6 @@ export const DEFAULT_LIMITS = {
   maxCapabilities: 16,
   capabilityChars: 48,
   freeDailyTokens: 1000, // free tokens per sender per UTC day
-  paygCapTokens: 250_000, // pay-as-you-go tab: tokens an agent may owe before settling
   bytesPerToken: 4, // token estimate: relay can't read plaintext, so ~4 ciphertext bytes ≈ 1 token
   sentLogCap: 200, // self-sealed sent copies kept per agent (ring buffer, not billed)
   reportRate: { windowMs: 24 * 60 * 60_000, max: 20 }, // abuse reports per reporter per day
@@ -43,18 +42,13 @@ export const DEFAULT_LIMITS = {
 export const REPORT_REASONS = ['spam', 'scam', 'phishing', 'impersonation', 'abuse', 'other'];
 
 export const PRICING = {
-  currency: 'USDC',
-  network: 'Base',
+  currency: 'USD',
+  processor: 'Stripe',
   unit: 'token',
   usdPerMillionTokens: 1,
   tokenEstimate:
     '1 token ≈ 4 bytes of message. The relay cannot read plaintext (E2EE), so tokens are estimated from ciphertext size. Minimum 1 token per wire.',
   free: { tokensPerDay: 1000, note: 'per agent, resets at UTC midnight; receiving is always free' },
-  payg: {
-    usdPerMillionTokens: 1,
-    tabTokens: 250_000,
-    note: 'unlocks after your first paid top-up: past the free tier, tokens go on a tab up to the cap, settled in USDC',
-  },
   bundles: [
     { tokens: 1_000_000, usd: 1 },
     { tokens: 25_000_000, usd: 19 },
@@ -62,7 +56,7 @@ export const PRICING = {
   ],
   creditsExpire: false,
   howToBuy:
-    'Payments are settled manually today: pay the relay operator in USDC on Base, and they grant token credits (or settle your tab) for your TG- address. The relay ships a Stripe checkout webhook (POST /v1/webhooks/stripe) for automated card purchases, but this relay has not enabled it yet — card checkout is coming, not live.',
+    'Past the free daily allowance, buy prepaid token credits by card through Stripe Checkout (see the "checkout" field of this pricing response for the link). Enter your TG- address in the checkout form so the relay credits the right account automatically. Credits never expire and are spent after your free allowance. No subscription, no tab — you only buy what you need.',
 };
 
 // Checkout amounts map to bundles exactly (bundles carry volume discounts);
@@ -83,6 +77,9 @@ export function createServer({
   // Set to the endpoint signing secret (whsec_...) from the Stripe dashboard to
   // enable automated credit grants on checkout; disabled (403) when unset.
   stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET,
+  // The Stripe Payment Link / Checkout URL agents are sent to buy credits. When
+  // unset, /v1/pricing reports checkout as not-yet-enabled on this relay.
+  checkoutUrl = process.env.TELEGRAPH_CHECKOUT_URL,
   // Only trust x-forwarded-for when a reverse proxy (Caddy, cloudflared) sets it;
   // trusting it on a directly exposed relay lets clients spoof their IP.
   trustProxy = process.env.TELEGRAPH_TRUST_PROXY === '1',
@@ -269,7 +266,7 @@ export function createServer({
           handle: '2-32 chars: a-z 0-9 _ - (case-insensitive, unique)',
           registrationRateLimit: `${LIMITS.registerRate.max} new identities per IP per ${Math.round(LIMITS.registerRate.windowMs / 60_000)} min; updating an existing registration is never throttled`,
           freeTier: `${LIMITS.freeDailyTokens} free tokens/day, resets at UTC midnight; receiving is always free`,
-          payment: 'past the free tier: prepaid credits, or a pay-as-you-go tab that unlocks after your first paid top-up — see /v1/pricing',
+          payment: 'past the free daily allowance: buy prepaid token credits by card via Stripe Checkout — see GET /v1/pricing for the link. Credits never expire; you only buy what you need.',
           abuse: `spam or scam wires: report them via POST /v1/reports (signed) with the wire's messageId (still in your mailbox) or its full envelope from your inbox, plus a reason (${REPORT_REASONS.join('|')}). Reports carry cryptographic proof the sender wired you. Agents reported by ${LIMITS.flagThreshold}+ distinct reporters are flagged in the directory; the operator can suspend senders. Directory records may carry "flagged" or "suspended" — check before trusting a stranger.`,
         },
         keySafety: 'Your secret keys never leave your machine and the relay never sees them. Losing them means losing the identity — store them like credentials.',
@@ -280,7 +277,9 @@ export function createServer({
       return send(res, 200, {
         ...PRICING,
         free: { ...PRICING.free, tokensPerDay: LIMITS.freeDailyTokens },
-        payg: { ...PRICING.payg, tabTokens: LIMITS.paygCapTokens },
+        checkout: checkoutUrl
+          ? { url: checkoutUrl, note: 'Stripe Checkout — enter your TG- address in the form so the credits land on your account.' }
+          : { url: null, note: 'card checkout is not enabled on this relay yet — contact the operator' },
       });
     }
 
@@ -453,29 +452,20 @@ export function createServer({
       // Token metering: the relay can't read plaintext, so it estimates tokens
       // from ciphertext size (nacl.box adds 16 bytes of overhead).
       const tokens = Math.max(1, Math.ceil(Math.max(1, safeB64Len(ciphertext) - 16) / LIMITS.bytesPerToken));
-      // Charge order: free daily allowance → prepaid credits → pay-as-you-go tab.
-      // A wire may span tiers; nothing is committed unless it's fully covered.
-      // The tab only opens after a first paid top-up, so a throwaway identity
-      // can't run one up and walk away.
-      bill.owed = bill.owed ?? 0;
-      const tabCap = bill.paidEver ? LIMITS.paygCapTokens : 0;
+      // Charge order: free daily allowance → prepaid credits. Prepaid only:
+      // there is no tab or debt — a wire is committed only if free + credits
+      // fully cover it, otherwise it's rejected with 402 and nothing changes.
       const fromFree = Math.min(tokens, Math.max(0, LIMITS.freeDailyTokens - bill.used));
       const fromCredits = Math.min(tokens - fromFree, bill.credits);
-      const fromTab = Math.min(tokens - fromFree - fromCredits, Math.max(0, tabCap - bill.owed));
-      if (fromFree + fromCredits + fromTab < tokens) {
-        const hint = bill.paidEver
-          ? `wire costs ${tokens} tokens; free allowance used, credits exhausted, and pay-as-you-go tab is full (${bill.owed} tokens owed) — settle in USDC or buy tokens, see GET /v1/pricing`
-          : `wire costs ${tokens} tokens; free daily allowance is used, and the pay-as-you-go tab unlocks after your first paid top-up — buy tokens, see GET /v1/pricing`;
-        return send(res, 402, { error: 'payment_required', hint });
+      if (fromFree + fromCredits < tokens) {
+        return send(res, 402, {
+          error: 'payment_required',
+          hint: `wire costs ${tokens} tokens; your free daily allowance is used up and prepaid credits are exhausted — buy more token credits by card, see GET /v1/pricing`,
+        });
       }
       bill.used += fromFree;
       bill.credits -= fromCredits;
-      bill.owed += fromTab;
-      const parts = [];
-      if (fromFree) parts.push('free');
-      if (fromCredits) parts.push('credit');
-      if (fromTab) parts.push('payg');
-      const charged = parts.length === 1 ? parts[0] : 'mixed';
+      const charged = fromFree && fromCredits ? 'mixed' : fromFree ? 'free' : 'credit';
       store.setBilling(from, bill);
       // senderRecord: snapshot of the sender's signed directory record at
       // delivery time. Without it, removing the sender (or a future key
@@ -500,9 +490,8 @@ export function createServer({
         id,
         tokens,
         charged,
-        breakdown: { free: fromFree, credits: fromCredits, payg: fromTab },
+        breakdown: { free: fromFree, credits: fromCredits },
         credits: bill.credits,
-        owed: bill.owed,
       });
     }
 
@@ -559,10 +548,6 @@ export function createServer({
         freeDailyTokens: LIMITS.freeDailyTokens,
         freeUsedToday: usedToday,
         freeRemainingToday: Math.max(0, LIMITS.freeDailyTokens - usedToday),
-        owed: bill.owed ?? 0,
-        paygCapTokens: LIMITS.paygCapTokens,
-        paygUnlocked: !!bill.paidEver,
-        paygRemaining: bill.paidEver ? Math.max(0, LIMITS.paygCapTokens - (bill.owed ?? 0)) : 0,
       });
     }
 
@@ -741,7 +726,6 @@ export function createServer({
       }
       const bill = store.getBilling(address);
       bill.credits += tokens;
-      bill.paidEver = true;
       store.setBilling(address, bill);
       store.recordPayment(sessionId, { status: 'credited', address, cents, tokens, at: Date.now() });
       return send(res, 200, { ok: true, credited: true, address, tokens, credits: bill.credits });
@@ -761,29 +745,8 @@ export function createServer({
       if (!agent) return send(res, 404, { error: 'unknown_agent' });
       const bill = store.getBilling(address);
       bill.credits += tokens;
-      bill.paidEver = true; // grants mean money changed hands — this unlocks the payg tab
       store.setBilling(address, bill);
       return send(res, 200, { ok: true, address, granted: tokens, credits: bill.credits });
-    }
-
-    if (route === 'POST /v1/credits/settle') {
-      const denied = checkAdmin(req, 'settle_disabled');
-      if (denied) return send(res, 403, denied);
-      const raw = await readRaw(req);
-      const body = parseJson(raw);
-      if (!body) return send(res, 400, { error: 'bad_json' });
-      const { address, tokens } = body;
-      if (!Number.isInteger(tokens) || tokens <= 0 || tokens > 100_000_000_000) {
-        return send(res, 400, { error: 'bad_tokens', hint: 'positive integer of tokens paid for' });
-      }
-      const agent = store.getAgent(address);
-      if (!agent) return send(res, 404, { error: 'unknown_agent' });
-      const bill = store.getBilling(address);
-      const before = bill.owed ?? 0;
-      bill.owed = Math.max(0, before - tokens);
-      bill.paidEver = true;
-      store.setBilling(address, bill);
-      return send(res, 200, { ok: true, address, settled: before - bill.owed, owed: bill.owed });
     }
 
     if (route === 'GET /v1/admin/overview') {
@@ -805,8 +768,6 @@ export function createServer({
           updatedAt: a.updatedAt,
           credits: bill.credits,
           freeUsedToday: bill.day === today ? bill.used : 0,
-          owed: bill.owed ?? 0,
-          paidEver: !!bill.paidEver,
           suspended: store.getModeration(a.address).suspended,
           reports: standing,
           mailbox: {
@@ -832,15 +793,13 @@ export function createServer({
         today,
         limits: {
           freeDailyTokens: LIMITS.freeDailyTokens,
-          paygCapTokens: LIMITS.paygCapTokens,
           mailboxCap: LIMITS.mailboxCap,
         },
-        pricing: { currency: PRICING.currency, network: PRICING.network, usdPerMillionTokens: PRICING.usdPerMillionTokens },
+        pricing: { currency: PRICING.currency, processor: PRICING.processor, usdPerMillionTokens: PRICING.usdPerMillionTokens },
         totals: {
           agents: agents.length,
           freeUsedToday: agents.reduce((s, a) => s + a.freeUsedToday, 0),
           creditsOutstanding: agents.reduce((s, a) => s + a.credits, 0),
-          owed: agents.reduce((s, a) => s + a.owed, 0),
           mailboxBacklog: agents.reduce((s, a) => s + a.mailbox.count, 0),
           reports: {
             total: reports.length,
@@ -882,7 +841,7 @@ export function createServer({
         ok: true,
         removed: { address: removed.address, handle: removed.handle },
         droppedMailboxMessages: mailboxCount,
-        forfeited: { credits: bill.credits, owed: bill.owed ?? 0 },
+        forfeited: { credits: bill.credits },
       });
     }
 
@@ -971,7 +930,6 @@ export function createServer({
         'GET /v1/reports/mine (signed)',
         'GET /owner (owner console UI)',
         'POST /v1/credits/grant (admin)',
-        'POST /v1/credits/settle (admin)',
         'GET /v1/admin/overview (admin)',
         'POST /v1/admin/agents/remove (admin)',
         'POST /v1/admin/agents/suspend (admin)',

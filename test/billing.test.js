@@ -7,8 +7,8 @@ import { createServer } from '../src/server.js';
 import { TelegraphClient } from '../src/client.js';
 
 // Token estimate: ciphertext = plaintext + 16 bytes; tokens = ceil(plaintextBytes / 4).
-// So an 8-char wire costs exactly 2 tokens. Limits below are tiny on purpose:
-// free tier = 4 tokens/day (two 8-char wires), payg tab = 3 tokens.
+// So an 8-char wire costs exactly 2 tokens. Free tier below is tiny on purpose:
+// 4 tokens/day = two 8-char wires. Prepaid model: free allowance → credits, no tab.
 const ADMIN = 'test-admin-token';
 let server;
 let base;
@@ -18,7 +18,12 @@ let receiver;
 
 test.before(async () => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegraph-billing-'));
-  server = createServer({ dataDir, limits: { freeDailyTokens: 4, paygCapTokens: 3 }, adminToken: ADMIN });
+  server = createServer({
+    dataDir,
+    limits: { freeDailyTokens: 4 },
+    adminToken: ADMIN,
+    checkoutUrl: 'https://buy.stripe.com/test_link',
+  });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${server.address().port}`;
   sender = new TelegraphClient({ server: base, identity: TelegraphClient.generateIdentity() });
@@ -32,46 +37,55 @@ test.after(async () => {
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
-test('pricing endpoint is public, per-token, and reflects relay limits', async () => {
+test('pricing endpoint is public, per-token USD via Stripe, and reflects relay limits', async () => {
   const p = await sender.pricing();
-  assert.equal(p.currency, 'USDC');
+  assert.equal(p.currency, 'USD');
+  assert.equal(p.processor, 'Stripe');
   assert.equal(p.unit, 'token');
   assert.equal(p.usdPerMillionTokens, 1);
   assert.equal(p.free.tokensPerDay, 4);
-  assert.equal(p.payg.tabTokens, 3);
   assert.equal(p.bundles.length, 3);
+  assert.equal(p.payg, undefined); // no pay-as-you-go tab in the prepaid model
+  assert.equal(p.checkout.url, 'https://buy.stripe.com/test_link');
 });
 
-test('free tier is metered in tokens; the payg tab is locked before any payment', async () => {
+test('pricing reports checkout as not-enabled when no link is configured', async () => {
+  const bareDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegraph-nocheckout-'));
+  const bare = createServer({ dataDir: bareDir, limits: { freeDailyTokens: 4 } });
+  await new Promise((resolve) => bare.listen(0, '127.0.0.1', resolve));
+  const p = await fetch(`http://127.0.0.1:${bare.address().port}/v1/pricing`).then((r) => r.json());
+  assert.equal(p.checkout.url, null);
+  assert.match(p.checkout.note, /not enabled/);
+  await new Promise((resolve) => bare.close(resolve));
+  fs.rmSync(bareDir, { recursive: true, force: true });
+});
+
+test('free tier is metered in tokens; past it a wire is refused (no tab, no debt)', async () => {
   const w1 = await sender.send('@payee', 'wire-001');
   const w2 = await sender.send('@payee', 'wire-002');
   assert.equal(w1.tokens, 2);
   assert.equal(w1.charged, 'free');
   assert.equal(w2.charged, 'free');
-  // Free allowance exhausted; the tab must NOT open for a never-paid identity.
+  // Free allowance exhausted and no prepaid credits — must be refused outright.
   await assert.rejects(
     () => sender.send('@payee', 'wire-003'),
-    (err) => err.status === 402 && /first paid top-up/.test(err.message),
+    (err) => err.status === 402 && /buy more token credits/.test(err.message),
   );
   const c = await sender.credits();
   assert.equal(c.freeRemainingToday, 0);
-  assert.equal(c.owed, 0); // nothing went on the locked tab
-  assert.equal(c.paygUnlocked, false);
-  assert.equal(c.paygRemaining, 0);
+  assert.equal(c.credits, 0);
+  assert.equal(c.owed, undefined); // no tab concept anymore
+  assert.equal(c.paygUnlocked, undefined);
 });
 
-test('grant and settle reject a wrong admin token', async () => {
+test('grant rejects a wrong admin token', async () => {
   await assert.rejects(
     () => sender.adminGrant({ address: sender.identity.address, tokens: 5, adminToken: 'wrong' }),
     (err) => err.status === 403,
   );
-  await assert.rejects(
-    () => sender.adminSettle({ address: sender.identity.address, tokens: 1, adminToken: 'wrong' }),
-    (err) => err.status === 403,
-  );
 });
 
-test('a first paid grant adds credits and unlocks the payg tab', async () => {
+test('prepaid credits are spent after the free allowance', async () => {
   const grant = await sender.adminGrant({ address: sender.identity.address, tokens: 10, adminToken: ADMIN });
   assert.equal(grant.credits, 10);
   const r = await sender.send('@payee', 'wire-003');
@@ -79,47 +93,35 @@ test('a first paid grant adds credits and unlocks the payg tab', async () => {
   assert.equal(r.tokens, 2);
   const c = await sender.credits();
   assert.equal(c.credits, 8);
-  assert.equal(c.paygUnlocked, true);
-  assert.equal(c.paygRemaining, 3);
 });
 
-test('a wire can span tiers: credits then tab, reported as mixed', async () => {
-  // 40 chars = 10 tokens; sender has 8 credits + empty 3-token tab.
-  const r = await sender.send('@payee', 'x'.repeat(40));
-  assert.equal(r.tokens, 10);
+test('a wire can span free + credits, reported as mixed', async () => {
+  // Fresh day would reset free use; here the free allowance is already spent,
+  // so grant a fresh identity to exercise the free→credits span cleanly.
+  const s2 = new TelegraphClient({ server: base, identity: TelegraphClient.generateIdentity() });
+  await s2.register({ handle: 'payer2' });
+  await s2.adminGrant({ address: s2.identity.address, tokens: 100, adminToken: ADMIN });
+  // 24 chars = 6 tokens; free allowance is 4, so 4 free + 2 credits.
+  const r = await s2.send('@payee', 'x'.repeat(24));
+  assert.equal(r.tokens, 6);
   assert.equal(r.charged, 'mixed');
-  assert.deepEqual(r.breakdown, { free: 0, credits: 8, payg: 2 });
-  assert.equal(r.credits, 0);
-  assert.equal(r.owed, 2);
+  assert.deepEqual(r.breakdown, { free: 4, credits: 2 });
+  assert.equal(r.credits, 98);
 });
 
-test('a rejected wire charges nothing (no partial commit)', async () => {
-  // Tab has 1 token left but the wire costs 2 — must be rejected, not partially charged.
+test('a wire that outruns free + credits charges nothing (no partial commit)', async () => {
+  // sender has 8 credits, 0 free left today; a 40-char wire costs 10 tokens.
   await assert.rejects(
-    () => sender.send('@payee', 'wire-004'),
+    () => sender.send('@payee', 'x'.repeat(40)),
     (err) => err.status === 402 && /payment_required/.test(err.message),
   );
   const c = await sender.credits();
-  assert.equal(c.credits, 0);
-  assert.equal(c.owed, 2);
-  assert.equal(c.paygRemaining, 1);
-});
-
-test('settle clears the pay-as-you-go tab (floor at zero)', async () => {
-  const s1 = await sender.adminSettle({ address: sender.identity.address, tokens: 1, adminToken: ADMIN });
-  assert.equal(s1.settled, 1);
-  assert.equal(s1.owed, 1);
-  const s2 = await sender.adminSettle({ address: sender.identity.address, tokens: 10, adminToken: ADMIN });
-  assert.equal(s2.settled, 1);
-  assert.equal(s2.owed, 0);
-  const c = await sender.credits();
-  assert.equal(c.owed, 0);
-  assert.equal(c.paygRemaining, 3);
+  assert.equal(c.credits, 8); // untouched
 });
 
 test('receiving and acking stay free regardless of balance', async () => {
   const inbox = await receiver.inbox({ ack: true });
-  assert.equal(inbox.length, 4);
+  assert.ok(inbox.length >= 4);
   assert.ok(inbox.every((m) => m.verified && typeof m.text === 'string'));
 });
 

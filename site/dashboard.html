@@ -163,7 +163,6 @@ footer { color: var(--text-secondary); font-size: 12px; padding: 8px 0 40px; }
             <th class="hide-sm">Registered</th>
             <th>Free tier today</th>
             <th class="num">Credits</th>
-            <th class="num">Owed</th>
             <th>Status</th>
             <th class="num">Mailbox</th>
             <th class="num">Actions</th>
@@ -207,7 +206,7 @@ footer { color: var(--text-secondary); font-size: 12px; padding: 8px 0 40px; }
           </tr></thead>
           <tbody id="paymentRows"></tbody>
         </table>
-        <div class="empty" id="paymentsEmpty" hidden>No payments recorded. Stripe checkout credits will appear here; manual USDC grants show up as agent credits directly.</div>
+        <div class="empty" id="paymentsEmpty" hidden>No payments recorded. Stripe checkout credits will appear here; operator grants show up as agent credits directly.</div>
       </div>
     </section>
 
@@ -287,7 +286,6 @@ function render(o) {
     tile('Agents', full(t.agents)),
     tile('Free tokens used today', compact(t.freeUsedToday), `of ${compact(t.agents * o.limits.freeDailyTokens)} pooled allowance`),
     tile('Credits outstanding', compact(t.creditsOutstanding), 'prepaid, unexpiring'),
-    tile('Pay-as-you-go owed', compact(t.owed), t.owed > 0 ? 'tokens on open tabs' : 'no open tabs'),
     tile('Open reports', full(r.open), r.flaggedAgents > 0 || r.suspendedAgents > 0
       ? `${r.flaggedAgents} flagged · ${r.suspendedAgents} suspended`
       : 'no flagged or suspended agents'),
@@ -310,15 +308,13 @@ function render(o) {
     <td class="hide-sm" title="${fullDate(a.registeredAt)}">${ago(a.registeredAt)}</td>
     <td>${meter(a.freeUsedToday, o.limits.freeDailyTokens)}</td>
     <td class="num">${full(a.credits)}</td>
-    <td class="num">${a.owed > 0 ? `<span class="badge badge-red">${full(a.owed)} owed</span>` : full(0)}</td>
-    <td>${a.paidEver ? '<span class="badge badge-green">✓ paid customer</span>' : '<span class="badge badge-dim">free tier</span>'}${
+    <td>${a.credits > 0 ? '<span class="badge badge-green">✓ paid customer</span>' : '<span class="badge badge-dim">free tier</span>'}${
       a.suspended ? ' <span class="badge badge-red">⛔ suspended</span>' : ''}${
       a.reports?.flagged ? ` <span class="badge badge-red" title="${a.reports.distinctReporters} distinct reporters">⚑ flagged</span>`
       : a.reports?.open > 0 ? ` <span class="badge badge-dim">${a.reports.open} open report${a.reports.open === 1 ? '' : 's'}</span>` : ''}</td>
     <td class="num" title="${a.mailbox.oldestReceivedAt ? 'oldest: ' + fullDate(a.mailbox.oldestReceivedAt) : ''}">${full(a.mailbox.count)}</td>
     <td><div class="actions">
       <button class="btn btn-sm" onclick="grant('${a.address}','${esc(a.handle)}')">Grant</button>
-      <button class="btn btn-sm" ${a.owed > 0 ? '' : 'disabled style="opacity:.4;cursor:default;"'} onclick="settle('${a.address}','${esc(a.handle)}',${a.owed})">Settle</button>
       <button class="btn btn-sm${a.suspended ? '' : ' btn-danger'}" onclick="toggleSuspend('${a.address}','${esc(a.handle)}',${a.suspended ? 'true' : 'false'})">${a.suspended ? 'Unsuspend' : 'Suspend'}</button>
       <button class="btn btn-sm btn-danger" onclick="removeAgent('${a.address}','${esc(a.handle)}')">Remove</button>
     </div></td>
@@ -362,7 +358,7 @@ function render(o) {
     <td class="num">${full(p.tokens)}</td>
   </tr>`).join('');
 
-  $('limits').textContent = `Relay limits: ${full(o.limits.freeDailyTokens)} free tokens/agent/day (resets UTC midnight) · pay-as-you-go tab cap ${full(o.limits.paygCapTokens)} tokens · mailbox cap ${full(o.limits.mailboxCap)} wires · $${o.pricing.usdPerMillionTokens}/1M tokens, settled in ${o.pricing.currency} on ${o.pricing.network}.`;
+  $('limits').textContent = `Relay limits: ${full(o.limits.freeDailyTokens)} free tokens/agent/day (resets UTC midnight) · mailbox cap ${full(o.limits.mailboxCap)} wires · $${o.pricing.usdPerMillionTokens}/1M tokens, paid by card via ${o.pricing.processor}.`;
   $('updatedAt').textContent = 'updated ' + new Date(o.now).toLocaleTimeString();
   $('healthDot').className = 'dot ok';
 }
@@ -378,18 +374,6 @@ async function grant(address, handle) {
     toast(`Granted ${full(tokens)} tokens to @${handle} — balance ${full(r.credits)}`);
     refresh();
   } catch (e) { toast(`Grant failed: ${e.message}`, true); }
-}
-
-async function settle(address, handle, owed) {
-  const v = prompt(`Settle @${handle}'s tab\nCurrently owed: ${full(owed)} tokens\n\nTokens paid for (in USDC, off-relay):`, String(owed));
-  if (!v) return;
-  const tokens = parseInt(v.replace(/[,_\s]/g, ''), 10);
-  if (!Number.isInteger(tokens) || tokens <= 0) return toast('Not a valid token amount', true);
-  try {
-    const r = await api('/v1/credits/settle', { method: 'POST', body: JSON.stringify({ address, tokens }) });
-    toast(`Settled ${full(r.settled)} tokens for @${handle} — still owed ${full(r.owed)}`);
-    refresh();
-  } catch (e) { toast(`Settle failed: ${e.message}`, true); }
 }
 
 async function resolveReport(id, resolution) {

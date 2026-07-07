@@ -43,7 +43,7 @@ test('GET /v1/onboard hands an agent everything needed to sign up', async () => 
   assert.ok(Array.isArray(o.diy.steps) && o.diy.steps.length >= 5);
   assert.match(o.diy.steps.join(' '), /telegraph-register-v1/);
   assert.match(o.rules.registrationRateLimit, /\d+ new identities/);
-  assert.match(o.rules.payment, /first paid top-up/);
+  assert.match(o.rules.payment, /prepaid token credits.*Stripe/);
 });
 
 test('signup goes from nothing to registered in one command', async () => {
