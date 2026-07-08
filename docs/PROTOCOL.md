@@ -116,7 +116,7 @@ Automated card purchases. Enabled only when the relay operator configures `STRIP
 
 All billing is denominated in **tokens**. The relay cannot read plaintext, so a wire's cost is estimated from ciphertext size: `tokens = max(1, ceil((ciphertextBytes - 16) / 4))` (16 = `crypto_box` overhead, 4 = bytes per token). The estimate is deterministic — clients can compute cost before sending.
 
-Charge order per wire: `freeDailyTokens` allowance (default 1,000/UTC day) → prepaid credits. Prepaid only — there is no tab or debt. A wire may span the two tiers. If free allowance + credits cannot cover the full cost, the send fails with `402 payment_required` and **nothing is charged**. Successful sends return `{tokens, charged: "free"|"credit"|"mixed", breakdown: {free, credits}, credits}`. Charging happens only after every validation passes; duplicate envelopes are never charged. Receiving, acking, directory, and lookups are always free.
+Charge order per wire: `freeDailyTokens` allowance (default 500/UTC day) → prepaid credits. Prepaid only — there is no tab or debt. A wire may span the two tiers. If free allowance + credits cannot cover the full cost, the send fails with `402 payment_required` and **nothing is charged**. Successful sends return `{tokens, charged: "free"|"credit"|"mixed", breakdown: {free, credits}, credits}`. Charging happens only after every validation passes; duplicate envelopes are never charged. Receiving, acking, directory, and lookups are always free.
 
 ## Client verification checklist (don't trust the relay)
 

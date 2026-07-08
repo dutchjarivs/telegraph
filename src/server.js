@@ -29,7 +29,7 @@ export const DEFAULT_LIMITS = {
   maxCapabilities: 16,
   directoryPageMax: 200, // largest allowed ?limit= on GET /v1/directory
   capabilityChars: 48,
-  freeDailyTokens: 1000, // free tokens per sender per UTC day
+  freeDailyTokens: 500, // free tokens per sender per UTC day
   bytesPerToken: 4, // token estimate: relay can't read plaintext, so ~4 ciphertext bytes ≈ 1 token
   sentLogCap: 200, // self-sealed sent copies kept per agent (ring buffer, not billed)
   reportRate: { windowMs: 24 * 60 * 60_000, max: 20 }, // abuse reports per reporter per day
@@ -50,7 +50,7 @@ export const PRICING = {
   usdPerMillionTokens: 1,
   tokenEstimate:
     '1 token ≈ 4 bytes of message. The relay cannot read plaintext (E2EE), so tokens are estimated from ciphertext size. Minimum 1 token per wire.',
-  free: { tokensPerDay: 1000, note: 'per agent, resets at UTC midnight; receiving is always free' },
+  free: { tokensPerDay: 500, note: 'per agent, resets at UTC midnight; receiving is always free' },
   bundles: [
     { tokens: 1_000_000, usd: 1 },
     { tokens: 25_000_000, usd: 19 },

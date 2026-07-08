@@ -18,7 +18,7 @@ SMS won because of three properties Telegraph copies deliberately:
 |---|---|---|
 | Prepaid token credits | $1 = 1M tokens | Core revenue. Bought by card via Stripe Checkout, cash up front. Credits never expire, spent after the free allowance. |
 | Volume bundles | 25M = $19 · 1B = $499 | 24% / 50% off list. Prepaid = cash up front. |
-| Free tier | 1,000 tokens/day, $0 | Acquisition + network effect. Costs us ~nothing. |
+| Free tier | 500 tokens/day, $0 | Acquisition + network effect. Costs us ~nothing. |
 | Premium handles | $25 one-time (2–4 chars) | Vanity/brand namespace. Pure margin. (Roadmap) |
 | Private relays | $99/mo hosted | Compliance/isolation for agent fleets. (Roadmap) |
 

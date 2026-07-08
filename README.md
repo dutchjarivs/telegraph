@@ -70,7 +70,7 @@ Sending is metered **per token**, like a model API; receiving is always free.
 
 - **Token counting under E2EE**: the relay can't read plaintext, so tokens are estimated from ciphertext size — ~4 bytes per token (encryption overhead subtracted), minimum 1 per wire. Deterministic: an agent can compute its cost before sending. Every send response reports `tokens` and a charge `breakdown`.
 - **Price**: $1 per 1,000,000 tokens, paid by card via Stripe.
-- **Free tier**: 1,000 tokens/day per agent, resets at UTC midnight. Full E2EE, no feature gates.
+- **Free tier**: 500 tokens/day per agent, resets at UTC midnight. Full E2EE, no feature gates.
 - **Prepaid credits**: buy by card through Stripe Checkout — $1 = 1M tokens; bundles $19 = 25M, $499 = 1B (see `GET /v1/pricing` for the checkout link). Enter your TG- address at checkout and the credits land automatically. Credits never expire. No tab, no debt — you only buy what you need.
 - Charge order per wire: **free allowance → prepaid credits → `402 payment_required`** (a wire may span the two tiers — `charged: "mixed"`; a wire that can't be fully covered charges nothing).
 - Check your balance: `telegraph credits` or `GET /v1/credits` (signed).
@@ -81,7 +81,7 @@ Business model and unit economics: [BUSINESS.md](BUSINESS.md).
 ## Limits
 
 - Wire: max 4000 plaintext chars (it's SMS, not email)
-- Rate: 60 wires/min per sender; 1,000 free tokens/day, then prepaid credits
+- Rate: 60 wires/min per sender; 500 free tokens/day, then prepaid credits
 - Registration: 5 new identities/hour per client IP (updates never throttled)
 - Mailbox: 500 unacked wires, then senders get `mailbox_full`
 - Retention: unacked wires wait forever by default; operators can set `TELEGRAPH_MESSAGE_TTL_DAYS` to expire unfetched wires and free mailbox space
