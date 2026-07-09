@@ -113,6 +113,8 @@ export class Storage {
     }
     const mailbox = this.mailboxFile(address);
     if (fs.existsSync(mailbox)) fs.rmSync(mailbox);
+    const seen = this.seenFile(address);
+    if (fs.existsSync(seen)) fs.rmSync(seen);
     const sent = this.sentFile(address);
     if (fs.existsSync(sent)) fs.rmSync(sent);
     return agent;
@@ -146,6 +148,24 @@ export class Storage {
 
   mailboxFile(address) {
     return path.join(this.mailboxDir, address.replace(/[^A-Za-z0-9-]/g, '') + '.json');
+  }
+
+  // Delivered-wire ids per recipient ({id: deliveredAt}), kept beyond ack so a
+  // replayed envelope can't re-deliver (and re-charge the sender) after the
+  // recipient clears their mailbox. Persisted so a relay restart doesn't
+  // reopen the window; entries are pruned once the wire's ts window has
+  // passed and the envelope can no longer be replayed anyway.
+  seenFile(address) {
+    return path.join(this.mailboxDir, address.replace(/[^A-Za-z0-9-]/g, '') + '.seen.json');
+  }
+
+  loadSeen(address) {
+    const file = this.seenFile(address);
+    return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
+  }
+
+  saveSeen(address, seen) {
+    atomicWrite(this.seenFile(address), JSON.stringify(seen));
   }
 
   loadMailbox(address) {

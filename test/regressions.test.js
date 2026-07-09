@@ -86,6 +86,66 @@ test('resending a delivered wire into a full mailbox is a duplicate, not a 507',
   assert.equal(overflow.status, 507);
 });
 
+test('a replayed envelope after ack is a duplicate and never re-charges the sender', async () => {
+  // The recipient holds the full signed envelope. Without a persistent seen
+  // ledger, acking then re-posting it would re-deliver and bill the sender
+  // again for every replay until the ts window closes.
+  const { encrypt, messageFields, signFields } = await import('../src/crypto.js');
+  const recipient = await bob.lookup('@alice3');
+  const enc = encrypt('charge me once', recipient.boxPublicKey, bob.identity.boxSecretKey);
+  const ts = Date.now();
+  const sig = signFields(messageFields(recipient.address, bob.identity.address, enc.nonce, enc.ciphertext, ts), bob.identity.signSecretKey);
+  const envelope = { to: recipient.address, from: bob.identity.address, nonce: enc.nonce, ciphertext: enc.ciphertext, ts, sig };
+  const post = async () => {
+    const res = await fetch(base + '/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(envelope),
+    });
+    return { status: res.status, body: await res.json() };
+  };
+  const first = await post();
+  assert.equal(first.status, 200);
+  assert.equal(first.body.duplicate ?? false, false);
+  const creditsAfterFirst = await bob.credits();
+  // Recipient acks the wire — mailbox no longer contains it.
+  const inbox = await alice.inbox();
+  await alice.ack(inbox.filter((m) => m.id === first.body.id).map((m) => m.id));
+  // Replay the identical envelope: must dedupe, not re-deliver or re-charge.
+  const replay = await post();
+  assert.equal(replay.status, 200);
+  assert.equal(replay.body.duplicate, true);
+  const creditsAfterReplay = await bob.credits();
+  assert.equal(creditsAfterReplay.freeUsedToday, creditsAfterFirst.freeUsedToday);
+  assert.equal(creditsAfterReplay.credits, creditsAfterFirst.credits);
+  const inboxAfter = await alice.inbox();
+  assert.equal(inboxAfter.some((m) => m.id === first.body.id), false);
+});
+
+test('a replayed stale registration cannot revert a newer record', async () => {
+  // Register payloads are public (ts + sig live in the directory record), so
+  // an old one must not overwrite a newer update within the freshness window.
+  const { registerFields, signFields } = await import('../src/crypto.js');
+  const id = TelegraphClient.generateIdentity();
+  const post = async (bio, ts) => {
+    const sig = signFields(registerFields('replaytest', id.signPublicKey, id.boxPublicKey, bio, [], ts), id.signSecretKey);
+    const res = await fetch(base + '/v1/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ handle: 'replaytest', signPublicKey: id.signPublicKey, boxPublicKey: id.boxPublicKey, bio, capabilities: [], ts, sig }),
+    });
+    return { status: res.status, body: await res.json() };
+  };
+  const oldTs = Date.now() - 1000;
+  assert.equal((await post('old bio', oldTs)).status, 200);
+  assert.equal((await post('new bio', Date.now())).status, 200);
+  const replay = await post('old bio', oldTs); // still inside the ±5 min window
+  assert.equal(replay.status, 409);
+  assert.equal(replay.body.error, 'stale_registration');
+  const record = await new TelegraphClient({ server: base }).lookup('@replaytest');
+  assert.equal(record.bio, 'new bio');
+});
+
 test('an oversized body gets 413, not 500', async () => {
   const res = await fetch(base + '/v1/register', {
     method: 'POST',

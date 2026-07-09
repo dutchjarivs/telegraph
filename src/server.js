@@ -362,6 +362,12 @@ export function createServer({
         return send(res, 409, { error: 'handle_taken' });
       }
       const prev = store.getAgent(address);
+      // Directory records are public and carry their ts + sig — the full
+      // register payload. Refusing older-than-current ts means a replayed
+      // stale payload can't revert a newer update within the freshness window.
+      if (prev && typeof prev.ts === 'number' && ts < prev.ts) {
+        return send(res, 409, { error: 'stale_registration', hint: 'a newer registration exists for this address — sign a fresh payload with a current ts' });
+      }
       // Anti-sybil: new identities are throttled per client IP. Updating an
       // existing registration (same address) is always allowed.
       if (!prev && !allowHit(registerMap, clientIp(req), LIMITS.registerRate)) {
@@ -503,8 +509,22 @@ export function createServer({
       const mailbox = loadMailbox(to);
       // Duplicate check before the cap check: resending an already-delivered
       // wire into a full mailbox is still a duplicate, not a 507.
+      // The seen ledger extends dedup past ack: without it, anyone holding the
+      // envelope (including the recipient) could replay it after the mailbox
+      // is cleared and bill the sender again for every replay until the ts
+      // window closes. Entries older than the replayable window are pruned.
       const id = wireId(sig);
-      if (mailbox.some((m) => m.id === id)) {
+      const seen = store.loadSeen(to);
+      const seenCutoff = Date.now() - 2 * LIMITS.msgWindowMs;
+      let pruned = false;
+      for (const [k, at] of Object.entries(seen)) {
+        if (at < seenCutoff) {
+          delete seen[k];
+          pruned = true;
+        }
+      }
+      if (mailbox.some((m) => m.id === id) || Object.hasOwn(seen, id)) {
+        if (pruned) store.saveSeen(to, seen);
         return send(res, 200, { ok: true, id, duplicate: true });
       }
       if (mailbox.length >= LIMITS.mailboxCap) {
@@ -542,6 +562,8 @@ export function createServer({
       // recipient can still verify it even after the live record is gone.
       mailbox.push({ id, to, from, nonce, ciphertext, ts, sig, receivedAt: Date.now(), senderRecord: sender });
       store.saveMailbox(to, mailbox);
+      seen[id] = Date.now();
+      store.saveSeen(to, seen);
       if (sentCopy) {
         store.appendSent(from, {
           id,
