@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createServer } from '../src/server.js';
+import { createServer, parseCheckoutUrls } from '../src/server.js';
 import { TelegraphClient } from '../src/client.js';
 
 // Token estimate: ciphertext = plaintext + 16 bytes; tokens = ceil(plaintextBytes / 4).
@@ -23,6 +23,7 @@ test.before(async () => {
     limits: { freeDailyTokens: 4 },
     adminToken: ADMIN,
     checkoutUrl: 'https://buy.stripe.com/test_link',
+    checkoutUrls: { 1: 'https://buy.stripe.com/test_1m', 19: 'https://buy.stripe.com/test_25m' },
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${server.address().port}`;
@@ -47,6 +48,10 @@ test('pricing endpoint is public, per-token USD via Stripe, and reflects relay l
   assert.equal(p.bundles.length, 3);
   assert.equal(p.payg, undefined); // no pay-as-you-go tab in the prepaid model
   assert.equal(p.checkout.url, 'https://buy.stripe.com/test_link');
+  // Per-bundle links: configured bundles carry their URL, unconfigured ones null.
+  assert.equal(p.bundles.find((b) => b.usd === 1).checkoutUrl, 'https://buy.stripe.com/test_1m');
+  assert.equal(p.bundles.find((b) => b.usd === 19).checkoutUrl, 'https://buy.stripe.com/test_25m');
+  assert.equal(p.bundles.find((b) => b.usd === 499).checkoutUrl, null);
 });
 
 test('pricing reports checkout as not-enabled when no link is configured', async () => {
@@ -56,8 +61,16 @@ test('pricing reports checkout as not-enabled when no link is configured', async
   const p = await fetch(`http://127.0.0.1:${bare.address().port}/v1/pricing`).then((r) => r.json());
   assert.equal(p.checkout.url, null);
   assert.match(p.checkout.note, /not enabled/);
+  assert.ok(p.bundles.every((b) => b.checkoutUrl === null));
   await new Promise((resolve) => bare.close(resolve));
   fs.rmSync(bareDir, { recursive: true, force: true });
+});
+
+test('parseCheckoutUrls reads usd=url pairs and drops malformed entries', () => {
+  const m = parseCheckoutUrls('1=https://buy.stripe.com/a, 19=https://buy.stripe.com/b,junk,=https://x,499=http://insecure');
+  assert.deepEqual(m, { 1: 'https://buy.stripe.com/a', 19: 'https://buy.stripe.com/b' });
+  assert.deepEqual(parseCheckoutUrls(undefined), {});
+  assert.deepEqual(parseCheckoutUrls(''), {});
 });
 
 test('free tier is metered in tokens; past it a wire is refused (no tab, no debt)', async () => {

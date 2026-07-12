@@ -94,6 +94,20 @@ if (!checkout) {
   add('checkout-url', 'ok', checkout);
 }
 
+const bundleUrls = env.TELEGRAPH_CHECKOUT_URLS ?? '';
+if (bundleUrls) {
+  const pairs = bundleUrls.split(',').filter((p) => p.trim());
+  const good = pairs.filter((p) => {
+    const i = p.indexOf('=');
+    return i > 0 && Number.isFinite(Number(p.slice(0, i).trim())) && /^https:\/\//.test(p.slice(i + 1).trim());
+  });
+  if (good.length === pairs.length) {
+    add('checkout-urls', 'ok', `${good.length} per-bundle link(s)`);
+  } else {
+    add('checkout-urls', 'fail', `TELEGRAPH_CHECKOUT_URLS has ${pairs.length - good.length} malformed pair(s) — expected "usd=https://..." comma-separated`);
+  }
+}
+
 if (whsec && !checkout) {
   add('stripe-pairing', 'warn', 'webhook secret set but no checkout URL — agents get credited if they find the link, but pricing won\'t show it');
 }

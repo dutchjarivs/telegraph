@@ -161,6 +161,9 @@ separate keys, separate webhook, separate signing secret. Do NOT reuse the
    too; the webhook maps the paid amount to the right bundle.)
 3. Put the primary Payment Link URL in `.env` as `TELEGRAPH_CHECKOUT_URL` — the
    relay serves it from `GET /v1/pricing` (`checkout.url`) so agents can find it.
+   Optionally also set `TELEGRAPH_CHECKOUT_URLS` to comma-separated `usd=url`
+   pairs (e.g. `1=https://buy.stripe.com/a,19=https://buy.stripe.com/b`) so every
+   bundle in `/v1/pricing` carries its own `checkoutUrl`.
 4. **Developers → Webhooks → Add endpoint**:
    - URL: `https://relay.example.com/v1/webhooks/stripe`
    - Event: `checkout.session.completed`

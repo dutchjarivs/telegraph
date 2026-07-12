@@ -58,7 +58,7 @@ export const PRICING = {
   ],
   creditsExpire: false,
   howToBuy:
-    'Past the free daily allowance, buy prepaid token credits by card through Stripe Checkout (see the "checkout" field of this pricing response for the link). Enter your TG- address in the checkout form so the relay credits the right account automatically. Credits never expire and are spent after your free allowance. No subscription, no tab — you only buy what you need.',
+    'Past the free daily allowance, buy prepaid token credits by card through Stripe Checkout. Each bundle carries its own "checkoutUrl"; the top-level "checkout" field is the default link. Enter your TG- address in the checkout form so the relay credits the right account automatically. Credits never expire and are spent after your free allowance. No subscription, no tab — you only buy what you need.',
 };
 
 // Checkout amounts map to bundles exactly (bundles carry volume discounts);
@@ -68,6 +68,21 @@ const BUNDLE_TOKENS_BY_CENTS = Object.fromEntries(PRICING.bundles.map((b) => [b.
 function tokensForCents(cents) {
   if (!Number.isInteger(cents) || cents <= 0) return 0;
   return BUNDLE_TOKENS_BY_CENTS[cents] ?? cents * 10_000;
+}
+
+// Per-bundle Payment Links come in as "1=https://...,19=https://...,499=https://..."
+// (keyed by the bundle's USD price). Malformed pairs are dropped rather than fatal
+// so one bad entry doesn't take checkout down for the other bundles.
+export function parseCheckoutUrls(raw) {
+  const map = {};
+  for (const pair of String(raw ?? '').split(',')) {
+    const i = pair.indexOf('=');
+    if (i < 1) continue;
+    const usd = Number(pair.slice(0, i).trim());
+    const url = pair.slice(i + 1).trim();
+    if (Number.isFinite(usd) && /^https:\/\//.test(url)) map[usd] = url;
+  }
+  return map;
 }
 
 const TG_ADDRESS_RE = /^TG-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$/;
@@ -82,6 +97,10 @@ export function createServer({
   // The Stripe Payment Link / Checkout URL agents are sent to buy credits. When
   // unset, /v1/pricing reports checkout as not-yet-enabled on this relay.
   checkoutUrl = process.env.TELEGRAPH_CHECKOUT_URL,
+  // Optional per-bundle Payment Links ("1=https://...,19=https://..."), keyed by
+  // the bundle's USD price; each bundle in /v1/pricing then carries its own
+  // checkoutUrl so agents can buy any size directly.
+  checkoutUrls = parseCheckoutUrls(process.env.TELEGRAPH_CHECKOUT_URLS),
   // Only trust x-forwarded-for when a reverse proxy (Caddy, cloudflared) sets it;
   // trusting it on a directly exposed relay lets clients spoof their IP.
   trustProxy = process.env.TELEGRAPH_TRUST_PROXY === '1',
@@ -320,6 +339,7 @@ export function createServer({
       return send(res, 200, {
         ...PRICING,
         free: { ...PRICING.free, tokensPerDay: LIMITS.freeDailyTokens },
+        bundles: PRICING.bundles.map((b) => ({ ...b, checkoutUrl: checkoutUrls[b.usd] ?? null })),
         checkout: checkoutUrl
           ? { url: checkoutUrl, note: 'Stripe Checkout — enter your TG- address in the form so the credits land on your account.' }
           : { url: null, note: 'card checkout is not enabled on this relay yet — contact the operator' },
