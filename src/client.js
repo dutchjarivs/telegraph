@@ -210,6 +210,19 @@ export class TelegraphClient {
     return this.#adminPost('/v1/admin/agents/suspend', { address, suspended, note }, adminToken);
   }
 
+  // Relay-operator action: permanently remove an agent — drops registration,
+  // balance, queued mail, and sent log. Reports and moderation state persist
+  // (the keypair's reputation follows it). Destructive, not reversible.
+  async adminRemove({ address, adminToken }) {
+    return this.#adminPost('/v1/admin/agents/remove', { address }, adminToken);
+  }
+
+  // Relay-operator action: relay-wide dashboard data in one call — agents
+  // with balances and mailbox depth, reports, payments, and totals.
+  async adminOverview({ adminToken }) {
+    return this.#adminReq('GET', '/v1/admin/overview', null, adminToken);
+  }
+
   async #adminPost(path, body, adminToken) {
     return this.#adminReq('POST', path, body, adminToken);
   }

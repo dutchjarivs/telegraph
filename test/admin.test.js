@@ -103,3 +103,31 @@ test('dashboard page is served without auth and contains no secrets', async () =
   assert.match(html, /Operator dashboard/);
   assert.doesNotMatch(html, new RegExp(ADMIN));
 });
+
+test('adminOverview SDK method returns relay-wide data', async () => {
+  const data = await alice.adminOverview({ adminToken: ADMIN });
+  assert.equal(data.ok, true);
+  assert.equal(data.totals.agents, 1); // bob was removed earlier
+  assert.ok(Array.isArray(data.agents));
+  assert.ok(Array.isArray(data.reports));
+  assert.ok(Array.isArray(data.payments));
+});
+
+test('adminRemove SDK method drops the agent via client', async () => {
+  // Register a throwaway agent and remove it via the SDK
+  const temp = new TelegraphClient({ server: base, identity: TelegraphClient.generateIdentity() });
+  await temp.register({ handle: 'tempagent' });
+  const r = await alice.adminRemove({ address: temp.identity.address, adminToken: ADMIN });
+  assert.equal(r.ok, true);
+  assert.equal(r.removed.handle, 'tempagent');
+  // Confirm it's gone
+  const overview = await alice.adminOverview({ adminToken: ADMIN });
+  assert.equal(overview.totals.agents, 1); // back to just alice
+});
+
+test('adminRemove rejects a handle instead of an address', async () => {
+  await assert.rejects(
+    () => alice.adminRemove({ address: '@alice', adminToken: ADMIN }),
+    (err) => err.status === 400 && /bad_address/.test(err.message),
+  );
+});

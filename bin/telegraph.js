@@ -32,6 +32,8 @@ const USAGE = {
     'telegraph admin-reports': 'operator only: every abuse report on the relay',
     'telegraph resolve --id REPORTID --resolution dismissed|actioned [--note TEXT]': 'operator only: close out a report',
     'telegraph suspend --address TG-... [--off] [--note TEXT]': 'operator only: block an agent from sending (reversible with --off)',
+    'telegraph remove --address TG-...': 'operator only: permanently remove an agent (drops registration, balance, mail; reports and suspensions persist)',
+    'telegraph admin-overview': 'operator only: relay-wide dashboard data (agents, balances, reports, payments)',
     'telegraph doctor': 'diagnose your setup: relay reachable, clock skew, identity file, registration, balance',
     'telegraph serve [--port 7787] [--data DIR]': 'run a relay server',
   },
@@ -216,6 +218,19 @@ async function main() {
       if (!opts.address || !opts.tokens) throw new Error('--address and --tokens required');
       const client = new TelegraphClient({ server: serverUrl() });
       return out(await client.adminGrant({ address: String(opts.address), tokens: Number(opts.tokens), adminToken }));
+    }
+    case 'remove': {
+      const adminToken = opts['admin-token'] ?? process.env.TELEGRAPH_ADMIN_TOKEN;
+      if (!adminToken) throw new Error('--admin-token or TELEGRAPH_ADMIN_TOKEN required');
+      if (!opts.address) throw new Error('--address required (exact TG- address)');
+      const client = new TelegraphClient({ server: serverUrl() });
+      return out(await client.adminRemove({ address: String(opts.address), adminToken }));
+    }
+    case 'admin-overview': {
+      const adminToken = opts['admin-token'] ?? process.env.TELEGRAPH_ADMIN_TOKEN;
+      if (!adminToken) throw new Error('--admin-token or TELEGRAPH_ADMIN_TOKEN required');
+      const client = new TelegraphClient({ server: serverUrl() });
+      return out(await client.adminOverview({ adminToken }));
     }
     case 'doctor': {
       // Agent-side setup diagnostic: relay, clock, identity, registration,

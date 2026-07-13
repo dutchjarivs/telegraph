@@ -98,6 +98,29 @@ test('grant rejects a wrong admin token', async () => {
   );
 });
 
+test('grant rejects a malformed address', async () => {
+  await assert.rejects(
+    () => sender.adminGrant({ address: 'not-a-tg-address', tokens: 5, adminToken: ADMIN }),
+    (err) => err.status === 400 && /bad_address/.test(err.message),
+  );
+  // Handles are also rejected — only exact TG- addresses are accepted.
+  await assert.rejects(
+    () => sender.adminGrant({ address: '@payee', tokens: 5, adminToken: ADMIN }),
+    (err) => err.status === 400 && /bad_address/.test(err.message),
+  );
+});
+
+test('grant rejects a non-positive token count', async () => {
+  await assert.rejects(
+    () => sender.adminGrant({ address: sender.identity.address, tokens: 0, adminToken: ADMIN }),
+    (err) => err.status === 400,
+  );
+  await assert.rejects(
+    () => sender.adminGrant({ address: sender.identity.address, tokens: -5, adminToken: ADMIN }),
+    (err) => err.status === 400,
+  );
+});
+
 test('prepaid credits are spent after the free allowance', async () => {
   const grant = await sender.adminGrant({ address: sender.identity.address, tokens: 10, adminToken: ADMIN });
   assert.equal(grant.credits, 10);

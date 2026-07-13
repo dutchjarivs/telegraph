@@ -848,6 +848,9 @@ export function createServer({
       const body = parseJson(raw);
       if (!body) return send(res, 400, { error: 'bad_json' });
       const { address, tokens } = body;
+      if (typeof address !== 'string' || !TG_ADDRESS_RE.test(address)) {
+        return send(res, 400, { error: 'bad_address', hint: 'exact TG- address required (handles are not accepted here)' });
+      }
       if (!Number.isInteger(tokens) || tokens <= 0 || tokens > 100_000_000_000) {
         return send(res, 400, { error: 'bad_tokens', hint: 'positive integer of tokens' });
       }
