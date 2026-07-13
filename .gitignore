@@ -11,3 +11,4 @@ data/
 .admin-token
 .stripe-webhook-secret
 *identity*.json
+start-telegraph.cmd
