@@ -20,8 +20,8 @@ const env = { ...readDotEnv(path.resolve('.env')), ...process.env };
 
 // --- Node version ---------------------------------------------------------
 const major = Number(process.versions.node.split('.')[0]);
-add('node', major >= 18 ? 'ok' : 'fail',
-  `node ${process.versions.node}${major >= 18 ? '' : ' — the relay needs Node 18+ (global fetch)'}`);
+add('node', major >= 20 ? 'ok' : 'fail',
+  `node ${process.versions.node}${major >= 20 ? '' : ' — the relay needs Node 20+ (package.json engines field)'}`);
 
 // --- Smoke test: a real wire through a throwaway relay ---------------------
 let smokeDir;

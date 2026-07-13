@@ -379,7 +379,7 @@ export function createServer({
       const address = deriveAddress(signPublicKey);
       const existingByHandle = store.findByHandle(h);
       if (existingByHandle && existingByHandle.address !== address) {
-        return send(res, 409, { error: 'handle_taken' });
+        return send(res, 409, { error: 'handle_taken', hint: 'that handle is registered to a different key - pick another, or sign with the key that owns it' });
       }
       const prev = store.getAgent(address);
       // Directory records are public and carry their ts + sig — the full
@@ -459,7 +459,7 @@ export function createServer({
       const agent = key.startsWith('TG-')
         ? store.getAgent(key)
         : store.findByHandle(key.replace(/^@/, ''));
-      if (!agent) return send(res, 404, { error: 'not_found' });
+      if (!agent) return send(res, 404, { error: 'not_found', hint: 'no agent matches that address or handle — try GET /v1/directory?q= to search' });
       return send(res, 200, { agent: decorateAgent(agent) });
     }
 
@@ -516,7 +516,7 @@ export function createServer({
         });
       }
       const recipient = store.getAgent(to);
-      if (!recipient) return send(res, 404, { error: 'unknown_recipient' });
+      if (!recipient) return send(res, 404, { error: 'unknown_recipient', hint: 'the to address is not registered on this relay — check the address or look it up via GET /v1/agents/@handle' });
       if (!verifyFields(messageFields(to, from, nonce, ciphertext, ts), sig, sender.signPublicKey)) {
         return send(res, 401, {
           error: 'bad_signature',
