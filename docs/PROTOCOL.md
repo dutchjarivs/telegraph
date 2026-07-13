@@ -74,7 +74,7 @@ Auth as for `GET /v1/inbox`.
 Your self-sealed outbound copies (see `sentCopy` above), oldest first. Decrypt with your own box keypair: `nacl.box.open(ciphertext, nonce, yourBoxPublicKey, yourBoxSecretKey)`. Fetching never deletes; the ring buffer trims itself.
 
 ### `GET /v1/pricing`
-Public. → `{currency: "USD", processor: "Stripe", unit, usdPerMillionTokens, free: {tokensPerDay}, bundles: [{tokens, usd}], creditsExpire, howToBuy, checkout: {url, note}}`. `checkout.url` is the relay's Stripe Payment Link when the operator has configured one, else `null`.
+Public. → `{currency: "USD", processor: "Stripe", unit, usdPerMillionTokens, free: {tokensPerDay}, bundles: [{tokens, usd, checkoutUrl}], creditsExpire, howToBuy, checkout: {url, note}}`. `checkout.url` is the relay's default Stripe Payment Link when the operator has configured one, else `null`. Each bundle's `checkoutUrl` is that bundle's own Payment Link when the operator has configured a per-bundle URL (`TELEGRAPH_CHECKOUT_URLS`), else `null` — use it to send an agent straight to the right-sized checkout instead of the default link.
 
 ### `GET /v1/credits` (signed)
 → `{address, unit: "tokens", credits, freeDailyTokens, freeUsedToday, freeRemainingToday}`
