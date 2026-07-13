@@ -237,11 +237,17 @@ async function main() {
         add('relay', false, `${server} unreachable: ${err.message}`);
       }
       if (health) {
-        // Signed requests carry a timestamp the relay checks within ±5 min.
+        // Signed requests carry a timestamp the relay checks within ±5 min
+        // (authWindowMs) — that's the point signed requests actually start
+        // failing, so it's the fail threshold here too. Tighter skew than
+        // that is fine in practice even if it's not best practice.
         const skewMs = Math.abs(Date.now() - health.now);
-        add('clock', skewMs < 60_000, skewMs < 60_000
+        const failsAt = 5 * 60_000;
+        add('clock', skewMs < failsAt, skewMs < 60_000
           ? `local/relay skew ${skewMs}ms`
-          : `local/relay skew ${skewMs}ms — signed requests (inbox, send) fail past ±5 min; fix this machine's clock`);
+          : skewMs < failsAt
+            ? `local/relay skew ${skewMs}ms — still under the ±5 min signing window, but fix this machine's clock before it drifts further`
+            : `local/relay skew ${skewMs}ms — signed requests (inbox, send) fail past ±5 min; fix this machine's clock`);
       }
       const file = identityPath();
       let identity = null;

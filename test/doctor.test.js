@@ -94,6 +94,26 @@ test('doctor against a dead relay: relay check fails, exit 1', async () => {
   assert.equal(check(r, 'relay').ok, false);
 });
 
+test('doctor tolerates clock skew under the ±5 min signing window', async () => {
+  // A fake relay whose /v1/health reports a clock 90s ahead of local time.
+  // Signed requests (authWindowMs = 5 min) would still succeed at that skew,
+  // so doctor's clock check must not fail here.
+  const http = await import('node:http');
+  const fake = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, service: 'telegraph', release: 'fake', uptimeSeconds: 1, agents: 0, now: Date.now() + 90_000 }));
+  });
+  await new Promise((resolve) => fake.listen(0, '127.0.0.1', resolve));
+  try {
+    const r = await doctor({ TELEGRAPH_SERVER: `http://127.0.0.1:${fake.address().port}` });
+    assert.equal(check(r, 'relay').ok, true);
+    assert.equal(check(r, 'clock').ok, true);
+    assert.match(check(r, 'clock').detail, /still under the ±5 min signing window/);
+  } finally {
+    await new Promise((resolve) => fake.close(resolve));
+  }
+});
+
 test('npm run preflight passes on this box (warnings allowed, no failures)', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'telegraph-preflight-home-'));
   try {
