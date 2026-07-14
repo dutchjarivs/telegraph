@@ -31,6 +31,13 @@ export const DEFAULT_LIMITS = {
   longPollWaiters: 8, // concurrent held inbox connections per address
   rate: { windowMs: 60_000, max: 60 },
   registerRate: { windowMs: 60 * 60_000, max: 5 }, // new identities per client IP per hour (anti-sybil)
+  // Unauthenticated directory reads (GET /v1/directory, GET /v1/agents/:x) per
+  // client IP. These are the only endpoints an anonymous stranger can hit at
+  // will, and without a cap the whole directory — every address, every public
+  // key, every bio — can be harvested in a loop and turned into a spam target
+  // list. 120/min is far above any real agent (which looks a correspondent up
+  // once and caches it) and far below a scraper.
+  lookupRate: { windowMs: 60_000, max: 120 },
   maxCapabilities: 16,
   directoryPageMax: 200, // largest allowed ?limit= on GET /v1/directory
   capabilityChars: 48,
@@ -135,6 +142,11 @@ export function createServer({
   const rateMap = new Map();
   const registerMap = new Map();
   const reportMap = new Map();
+  const lookupMap = new Map();
+  // Set once the relay sees a request it cannot attribute to a distinct client
+  // (see clientsAreIndistinguishable). Surfaced to the operator so a silently
+  // ineffective rate limit doesn't look like a working one.
+  let indistinctClients = false;
 
   // Long-poll waiters: address -> Set of held inbox requests, each with a
   // wake() that is safe to call more than once. Purely in-memory and
@@ -224,6 +236,7 @@ export function createServer({
     [rateMap, LIMITS.rate.windowMs],
     [registerMap, LIMITS.registerRate.windowMs],
     [reportMap, LIMITS.reportRate.windowMs],
+    [lookupMap, LIMITS.lookupRate.windowMs],
   ];
   const sweepTimer = setInterval(() => {
     const now = Date.now();
@@ -448,6 +461,7 @@ export function createServer({
     }
 
     if (route === 'GET /v1/directory') {
+      if (!allowLookup(req)) return tooManyLookups(res);
       const q = (url.searchParams.get('q') ?? '').toLowerCase();
       // Suspended agents are delisted from discovery; direct lookup by address
       // or handle still works (labelled), so correspondents can see why.
@@ -486,6 +500,7 @@ export function createServer({
     }
 
     if (req.method === 'GET' && url.pathname.startsWith('/v1/agents/')) {
+      if (!allowLookup(req)) return tooManyLookups(res);
       let key;
       try {
         key = decodeURIComponent(url.pathname.slice('/v1/agents/'.length));
@@ -1075,6 +1090,18 @@ export function createServer({
           mailboxCap: LIMITS.mailboxCap,
           messageTtlMs: LIMITS.messageTtlMs,
         },
+        // A per-IP limit that can't tell clients apart is not a limit. Report it
+        // rather than let a skipped rate limit look like an enforced one.
+        health: {
+          trustProxy,
+          clientIpsIndistinguishable: indistinctClients,
+          ...(indistinctClients && trustProxy ? {
+            warning: 'requests are arriving with no usable CF-Connecting-IP or X-Forwarded-For, ' +
+              'so every client looks like the proxy. Per-IP directory read limits are being skipped ' +
+              '(throttling one shared bucket would rate-limit every agent at once). Fix the proxy ' +
+              'to forward the client IP.',
+          } : {}),
+        },
         pricing: { currency: PRICING.currency, processor: PRICING.processor, usdPerMillionTokens: PRICING.usdPerMillionTokens },
         totals: {
           agents: agents.length,
@@ -1270,6 +1297,11 @@ export function createServer({
 
   function clientIp(req) {
     if (trustProxy) {
+      // CF-Connecting-IP first: Cloudflare overwrites it at the edge with the
+      // true client address, so unlike X-Forwarded-For it can't be stuffed with
+      // extra hops by the client. Fall back to XFF for Caddy/nginx/other proxies.
+      const cf = req.headers['cf-connecting-ip'];
+      if (typeof cf === 'string' && looksLikeIp(cf.trim())) return cf.trim();
       const xff = req.headers['x-forwarded-for'];
       if (typeof xff === 'string' && xff.length) {
         // Only honour a plausibly-shaped IP as the first hop; a garbage value
@@ -1280,6 +1312,80 @@ export function createServer({
       }
     }
     return req.socket.remoteAddress ?? 'unknown';
+  }
+
+  // True when every client is collapsing to the same key.
+  //
+  // If the relay sits behind a proxy that doesn't forward the client address
+  // (or TELEGRAPH_TRUST_PROXY is off while it *is* behind one), then clientIp()
+  // returns the proxy's own loopback address for everybody. A per-IP limit keyed
+  // on that isn't a limit on one abuser — it's a shared bucket that the whole
+  // userbase fills together, and the first scraper takes every legitimate agent
+  // down with them.
+  //
+  // So a per-IP *read* limit is skipped in that state rather than applied to a
+  // bucket it would be actively harmful to enforce. That deliberately fails open,
+  // and it is the right trade here: the status quo for these endpoints is no
+  // limit at all, so skipping can never be worse than today, whereas throttling
+  // everyone at once would be a self-inflicted outage. The operator gets told
+  // once, loudly, and `telegraph doctor` reports it — see indistinctClients.
+  // Two ways the relay ends up unable to tell one client from another:
+  //
+  //   1. The resolved address is loopback — a proxy on this same host that isn't
+  //      forwarding the client IP (or whose header we're not trusting).
+  //
+  //   2. A forwarding header is present while TELEGRAPH_TRUST_PROXY is off. That
+  //      means a proxy *is* in front of us and we are ignoring what it says, so
+  //      the socket address is the proxy's own. A same-host proxy makes that
+  //      loopback and case 1 catches it — but a proxy on a *different* host has a
+  //      perfectly ordinary LAN address, which sails past case 1 and becomes a
+  //      single bucket that the entire userbase shares. The first scraper would
+  //      then 429 every legitimate agent on the relay. The header is the only
+  //      tell available, so it's the one we use.
+  function clientsAreIndistinguishable(req, ip) {
+    if (ip === 'unknown' || ip === '::1' || ip === '::ffff:127.0.0.1' || ip.startsWith('127.')) return true;
+    if (!trustProxy && (req.headers['x-forwarded-for'] || req.headers['cf-connecting-ip'])) return true;
+    return false;
+  }
+
+  // Retry-After tells an honest client exactly when to come back, so a caller in
+  // a loop backs off instead of hammering a closed door and looking like an
+  // attacker. Nothing an actual scraper is obliged to respect — but a rate limit
+  // that gives well-behaved clients no way to behave well is a badly-aimed one.
+  function tooManyLookups(res) {
+    const seconds = Math.ceil(LIMITS.lookupRate.windowMs / 1000);
+    res.setHeader('retry-after', String(seconds));
+    return send(res, 429, {
+      error: 'rate_limited',
+      hint: `max ${LIMITS.lookupRate.max} directory reads per ${seconds}s per IP — cache the records you look up`,
+    });
+  }
+
+  let warnedIndistinct = false;
+  function allowLookup(req) {
+    const ip = clientIp(req);
+    if (clientsAreIndistinguishable(req, ip)) {
+      indistinctClients = true;
+      if (!warnedIndistinct) {
+        warnedIndistinct = true;
+        const untrustedProxy = !trustProxy &&
+          (req.headers['x-forwarded-for'] || req.headers['cf-connecting-ip']);
+        log(JSON.stringify({
+          warn: 'client_ip_indistinguishable',
+          detail: untrustedProxy
+            ? 'requests carry a forwarding header but TELEGRAPH_TRUST_PROXY is off, so every client ' +
+              'resolves to the proxy. Per-IP read limits are being SKIPPED rather than applied to one ' +
+              'shared bucket (which would throttle every agent at once). Set TELEGRAPH_TRUST_PROXY=1 — ' +
+              'but only if the relay is reachable *solely* through that proxy, or clients could spoof ' +
+              'the header and choose their own limit. See docs/DEPLOY.md.'
+            : 'requests resolve to a loopback address, so every client looks identical. If the relay is ' +
+              'behind a proxy, it is not forwarding the client IP. Per-IP read limits are being SKIPPED ' +
+              'rather than applied to one shared bucket. See docs/DEPLOY.md.',
+        }));
+      }
+      return true;
+    }
+    return allowHit(lookupMap, ip, LIMITS.lookupRate);
   }
 
   function readRaw(req) {

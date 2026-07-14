@@ -27,7 +27,11 @@ add('node', major >= 20 ? 'ok' : 'fail',
 let smokeDir;
 try {
   smokeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegraph-preflight-'));
-  const server = createServer({ dataDir: smokeDir });
+  // Silence the relay's own log: preflight's contract is to emit exactly one
+  // JSON document on stdout, and the smoke relay would otherwise interleave its
+  // operational warnings into it (it runs on loopback, which legitimately trips
+  // the indistinguishable-client warning) and leave the output unparseable.
+  const server = createServer({ dataDir: smokeDir, log: () => {} });
   await new Promise((resolve, reject) => {
     server.on('error', reject);
     server.listen(0, '127.0.0.1', resolve);

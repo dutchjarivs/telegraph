@@ -6,14 +6,60 @@ import path from 'node:path';
 import { createServer } from '../src/server.js';
 import { TelegraphClient } from '../src/client.js';
 
-// Phase 2 hardening: rate limit gap — directory lookup has no rate limit.
-// A malicious agent could hammer GET /v1/agents/@handle to enumerate the
-// entire directory or DoS the relay. This test documents the current
-// behavior (no limit) so we know to add one.
+// Directory reads are now rate-limited per IP. This test was a `skip` marking the
+// gap: GET /v1/directory and GET /v1/agents/:x are the only endpoints an
+// anonymous stranger can hit at will, and without a cap the entire directory —
+// every address, public key and bio — can be harvested in a loop and turned into
+// a spam target list. Now implemented; the skip is replaced with real coverage.
+// The trust-proxy and shared-bucket cases live in test/hardening.test.js.
 
-test.skip('directory lookup should be rate-limited per IP', async () => {
-  // Skipped: rate limiting on GET /v1/agents/{x} is not yet implemented.
-  // This is a hardening gap, not a regression.
+test('directory reads are rate-limited per IP', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegraph-lookuprate-'));
+  // trustProxy + an XFF header is how a test says "this request came from a real
+  // remote client". Without it every request originates from 127.0.0.1, which the
+  // relay treats as an indistinguishable client and deliberately does not throttle
+  // (see the shared-bucket tests in hardening.test.js).
+  const server = createServer({
+    dataDir,
+    trustProxy: true,
+    limits: { lookupRate: { windowMs: 60_000, max: 5 } },
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const scraper = { 'x-forwarded-for': '203.0.113.50' };
+  try {
+    const agent = new TelegraphClient({ server: base, identity: TelegraphClient.generateIdentity() });
+    await agent.register({ handle: 'scrape-me' });
+
+    // Five reads are fine; the sixth is refused.
+    for (let i = 0; i < 5; i++) {
+      const ok = await fetch(`${base}/v1/agents/@scrape-me`, { headers: scraper });
+      assert.equal(ok.status, 200, `read ${i + 1} should pass`);
+    }
+    const blocked = await fetch(`${base}/v1/agents/@scrape-me`, { headers: scraper });
+    assert.equal(blocked.status, 429);
+    assert.equal((await blocked.json()).error, 'rate_limited');
+    // An honest client in a loop needs to be told when to come back, or it can't
+    // back off — and then it looks exactly like the scraper we're trying to stop.
+    assert.equal(blocked.headers.get('retry-after'), '60');
+
+    // The whole-directory endpoint shares the budget: enumerating via
+    // /v1/directory instead of one-by-one must not be a way around the cap.
+    assert.equal((await fetch(`${base}/v1/directory`, { headers: scraper })).status, 429);
+
+    // Health is not part of the scraping surface and must stay up — it's what a
+    // monitor polls, and throttling your own uptime check is a fine way to get
+    // paged at 4am for an outage that isn't happening.
+    assert.equal((await fetch(`${base}/v1/health`, { headers: scraper })).status, 200);
+
+    // And the capped scraper has not affected anybody else.
+    assert.equal((await fetch(`${base}/v1/directory`, {
+      headers: { 'x-forwarded-for': '198.51.100.77' },
+    })).status, 200, 'a different agent is still served');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
 });
 
 // Phase 2: admin overview should not leak secret config values

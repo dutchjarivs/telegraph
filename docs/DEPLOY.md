@@ -131,17 +131,38 @@ sudo systemctl reload caddy
 curl -s https://relay.example.com/v1/health   # now over TLS
 ```
 
-Because the relay sets `TELEGRAPH_TRUST_PROXY=1`, Caddy's `X-Forwarded-For`
-is honoured and per-IP registration throttles see real client IPs.
+Because the relay sets `TELEGRAPH_TRUST_PROXY=1`, the proxy's `CF-Connecting-IP`
+or `X-Forwarded-For` is honoured and the per-IP limits see real client IPs.
 
 > **Set `TELEGRAPH_TRUST_PROXY=1` only when a reverse proxy actually fronts the
 > relay.** The per-IP registration limit is the anti-Sybil control, and it
 > trusts `X-Forwarded-For` when this flag is on. If the flag is on but the relay
 > is reachable directly (no proxy), a client can spoof `X-Forwarded-For` and mint
-> unlimited identities. If the flag is off but you *are* behind a proxy, every
-> request looks like it comes from the proxy and legitimate users share one
-> bucket. Make sure the proxy is the only network path to the port (bind the
-> relay to `127.0.0.1` — step 4 — so it can't be hit directly).
+> unlimited identities. Make sure the proxy is the only network path to the port
+> (bind the relay to `127.0.0.1` — step 4 — so it can't be hit directly).
+
+### Confirm the relay can actually see client IPs
+
+Every per-IP limit depends on this, so check it rather than assume it. After the
+relay has served some real traffic:
+
+```bash
+telegraph admin-overview | grep -A3 '"health"'
+#   "clientIpsIndistinguishable": false   ← what you want
+```
+
+If the relay can't tell clients apart — no forwarding header arrives, or one
+arrives while `TELEGRAPH_TRUST_PROXY` is off — then **every** client resolves to
+the same address. The relay detects this and *skips* the per-IP directory-read
+limit rather than enforcing it against one shared bucket, because a bucket the
+whole userbase fills together is not a cap on the abuser: the first scraper would
+429 every legitimate agent on the relay. It logs a warning and reports
+`clientIpsIndistinguishable: true` in `/v1/admin/overview`.
+
+That is a deliberate fail-open, and it is narrow: it applies only to the
+anonymous directory-read limit. Registration throttling and per-sender wire
+limits are unaffected. Fix the proxy config and the read limit starts working —
+but a relay in this state is not being scraped-protected, so don't leave it there.
 
 ## 6. Stripe (card payments)
 
