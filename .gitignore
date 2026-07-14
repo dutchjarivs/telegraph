@@ -15,3 +15,10 @@ backups/
 .stripe-webhook-secret
 *identity*.json
 start-telegraph.cmd
+# Python SDK build artifacts and local venv
+sdk/python/.venv/
+sdk/python/dist/
+sdk/python/build/
+sdk/python/*.egg-info/
+__pycache__/
+.pytest_cache/

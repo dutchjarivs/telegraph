@@ -1,0 +1,274 @@
+"""Live interop against a real Node relay.
+
+The conformance tests prove the crypto agrees at the byte level. These prove the
+whole thing actually works: a real relay process, on a real port, with a Python
+agent and a JavaScript agent talking to each other in both directions.
+
+This is the test that would have caught every integration bug I could have
+written — a wrong header name, a signature over the query string, a body hashed
+after re-serialization. None of those show up in a unit test with a mocked
+transport, which is why there isn't one.
+"""
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import shutil
+import socket
+import subprocess
+import tempfile
+import time
+
+import pytest
+
+from telegraph import TelegraphClient, TelegraphError
+
+REPO = pathlib.Path(__file__).resolve().parents[3]  # …/telegraph
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture(scope="module")
+def relay():
+    """A real relay process, on a throwaway data directory.
+
+    Booted via tests/relay.js rather than `telegraph serve`, so the anti-sybil
+    registration cap (5/IP/hour in production) can be raised for the harness
+    without touching the relay's real defaults.
+    """
+    data_dir = tempfile.mkdtemp(prefix="telegraph-pysdk-")
+    proc = subprocess.Popen(
+        ["node", str(pathlib.Path(__file__).parent / "relay.js"), data_dir],
+        cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env={**os.environ, "TELEGRAPH_ADMIN_TOKEN": ""},
+    )
+
+    # The relay prints the port it bound. Read it rather than guessing — picking
+    # a free port and hoping nothing takes it first is a flaky test waiting.
+    line = proc.stdout.readline()
+    if not line:
+        raise RuntimeError("relay died on startup")
+    port = json.loads(line)["port"]
+    base = f"http://127.0.0.1:{port}"
+
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError("relay died on startup")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+                break
+        except OSError:
+            time.sleep(0.1)
+    else:
+        raise RuntimeError("relay never came up")
+
+    yield base
+
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    shutil.rmtree(data_dir, ignore_errors=True)
+
+
+def node_client_script(base: str, identity: dict, script: str) -> dict:
+    """Run a snippet against the *JavaScript* SDK, so both sides are exercised."""
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", f"""
+        import {{ TelegraphClient }} from './src/client.js';
+        const identity = JSON.parse(process.argv[1]);
+        const tg = new TelegraphClient({{ server: '{base}', identity }});
+        {script}
+        """, json.dumps(identity)],
+        cwd=REPO, capture_output=True, check=True,
+    )
+    return json.loads(proc.stdout or b"{}")
+
+
+def test_python_agent_registers_and_the_relay_accepts_its_signature(relay):
+    # If canonical JSON were wrong by a single byte, this is where it dies:
+    # the relay verifies the registration signature over those exact bytes.
+    tg = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    res = tg.register(handle="py-first", bio="registered from Python 🤠", capabilities=["test"])
+    assert res.get("ok") or res.get("agent") or res.get("address"), res
+
+    # And the record we get back is self-signed and key-bound — which is what
+    # makes it safe to trust a directory served by a relay you don't control.
+    me = tg.lookup("@py-first")
+    assert me["verified"] is True
+    assert me["address"] == tg.identity["address"]
+    assert me["bio"] == "registered from Python 🤠"
+
+
+def test_python_sends_and_javascript_reads_it(relay):
+    py = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    js_identity = TelegraphClient.generate_identity()
+    js = TelegraphClient(relay, identity=js_identity)
+
+    py.register(handle="py-sender")
+    js.register(handle="js-reader")
+
+    body = "from Python to JavaScript — 🤠 café 電報"
+    py.send("@js-reader", body)
+
+    # Read it with the *real* JavaScript SDK, not with Python.
+    out = node_client_script(relay, js_identity, """
+        const msgs = await tg.inbox();
+        process.stdout.write(JSON.stringify(msgs.map((m) => ({
+          text: m.text, verified: m.verified, fromHandle: m.fromHandle,
+        }))));
+    """)
+    assert len(out) == 1
+    assert out[0]["text"] == body, "JavaScript could not decrypt what Python sealed"
+    assert out[0]["verified"] is True, "JavaScript could not verify Python's signature"
+    assert out[0]["fromHandle"] == "py-sender"
+
+
+def test_javascript_sends_and_python_reads_it(relay):
+    py_identity = TelegraphClient.generate_identity()
+    py = TelegraphClient(relay, identity=py_identity)
+    js_identity = TelegraphClient.generate_identity()
+
+    py.register(handle="py-reader")
+    TelegraphClient(relay, identity=js_identity).register(handle="js-sender")
+
+    body = "from JavaScript to Python — \" quotes \\ backslash \n newline"
+    node_client_script(relay, js_identity, f"""
+        await tg.send('@py-reader', {json.dumps(body)});
+        process.stdout.write('{{}}');
+    """)
+
+    msgs = py.inbox()
+    assert len(msgs) == 1
+    assert msgs[0].text == body, "Python could not decrypt what JavaScript sealed"
+    assert msgs[0].verified is True, "Python could not verify JavaScript's signature"
+    assert msgs[0].from_handle == "js-sender"
+
+
+def test_signed_endpoints_all_work_from_python(relay):
+    """Every signed route, because each one signs a different path and body."""
+    tg = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    other = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    tg.register(handle="py-signed")
+    other.register(handle="py-other")
+
+    assert isinstance(tg.credits(), dict)         # GET, empty body hash
+    assert isinstance(tg.pricing(), dict)         # unsigned
+    assert tg.blocks() == []                      # GET signed
+
+    tg.send("@py-other", "a wire to have some sent history")
+    assert len(tg.sent()) == 1                    # GET signed
+    assert tg.sent()[0]["text"] == "a wire to have some sent history"
+
+    # POST signed, with a body — the hash has to be over the bytes we actually
+    # transmitted, not over a re-serialization of the same object.
+    tg.block("@py-other", note="testing")
+    assert len(tg.blocks()) == 1
+    tg.unblock("@py-other")
+    assert tg.blocks() == []
+
+    # ack: POST signed with an array body
+    msgs = other.inbox()
+    assert len(msgs) == 1
+    other.ack([m.id for m in msgs])
+    assert other.inbox() == []
+
+
+def test_ack_clears_the_mailbox_and_inbox_ack_shorthand_works(relay):
+    a = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    b = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    a.register(handle="py-acka")
+    b.register(handle="py-ackb")
+
+    a.send("@py-ackb", "read and acked in one call")
+    msgs = b.inbox(ack=True)
+    assert len(msgs) == 1
+    assert b.inbox() == [], "ack=True should have cleared the mailbox"
+
+
+def test_blocking_from_python_actually_stops_a_wire(relay):
+    victim = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    spammer = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    victim.register(handle="py-victim")
+    spammer.register(handle="py-spammer")
+
+    spammer.send("@py-victim", "before the block")
+    victim.block("@py-spammer")
+
+    with pytest.raises(TelegraphError) as err:
+        spammer.send("@py-victim", "after the block")
+    assert err.value.status == 403
+    assert err.value.data["error"] == "recipient_blocked_sender"
+
+    # The blocked wire was never stored: only the pre-block one is there.
+    assert len(victim.inbox()) == 1
+
+
+def test_long_poll_returns_the_instant_a_wire_lands(relay):
+    import threading
+
+    a = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    b = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    a.register(handle="py-lpa")
+    b.register(handle="py-lpb")
+
+    # Park on an empty mailbox with a 20s hold, then send after a beat. If
+    # long-poll works, this returns in well under a second — not in 20.
+    def send_soon():
+        time.sleep(1.0)
+        a.send("@py-lpb", "woke you up")
+
+    threading.Thread(target=send_soon, daemon=True).start()
+    started = time.time()
+    msgs = b.inbox(wait=20)
+    elapsed = time.time() - started
+
+    assert len(msgs) == 1
+    assert msgs[0].text == "woke you up"
+    assert elapsed < 10, f"long-poll took {elapsed:.1f}s — it looks like it polled rather than woke"
+
+
+def test_long_poll_timing_out_is_empty_not_an_error(relay):
+    b = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    b.register(handle="py-lp-timeout")
+    started = time.time()
+    assert b.inbox(wait=2) == []          # nothing arrives; must not raise
+    assert time.time() - started >= 1.5   # and it really did hold the connection
+
+
+def test_a_relay_error_is_a_typed_exception_not_a_crash(relay):
+    tg = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    with pytest.raises(TelegraphError) as err:
+        tg.lookup("@nobody-is-called-this")
+    assert err.value.status == 404
+    assert err.value.data.get("error")
+
+    # Sending to someone who doesn't exist fails before any encryption happens.
+    tg.register(handle="py-errors")
+    with pytest.raises(TelegraphError):
+        tg.send("@still-nobody", "into the void")
+
+    # And the SDK rejects a nonsense wire without troubling the relay at all.
+    with pytest.raises(ValueError):
+        tg.send("@py-errors", "")
+    with pytest.raises(ValueError):
+        tg.send("@py-errors", "x" * 4001)
+
+
+def test_an_identity_round_trips_through_a_file(relay, tmp_path):
+    path = tmp_path / "id.json"
+    tg = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    tg.register(handle="py-persist")
+    TelegraphClient.save_identity(tg.identity, str(path))
+
+    # A fresh process, loading the key off disk, is the same agent.
+    reloaded = TelegraphClient(relay, identity=TelegraphClient.load_identity(str(path)))
+    assert reloaded.identity["address"] == tg.identity["address"]
+    assert isinstance(reloaded.credits(), dict), "the reloaded identity can still sign"
