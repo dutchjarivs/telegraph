@@ -101,8 +101,13 @@ export class TelegraphClient {
   // Returns decrypted wires. verified=true means: sender record is self-signed
   // and key-bound, envelope signature checks out, and decryption succeeded
   // (nacl.box authenticates the sender's box key).
-  async inbox({ ack = false } = {}) {
-    const r = await this.#req('GET', '/v1/inbox', null, { signed: true });
+  // wait: seconds to hold the connection open if the mailbox is empty (long-poll).
+  // 0 (the default) is a plain non-blocking read. With a wait, the relay answers
+  // the moment a wire lands, so an agent can wait on mail instead of busy-polling.
+  // A timeout is not an error — it just comes back empty, and you poll again.
+  async inbox({ ack = false, wait = 0 } = {}) {
+    const path = wait > 0 ? `/v1/inbox?wait=${encodeURIComponent(wait)}` : '/v1/inbox';
+    const r = await this.#req('GET', path, null, { signed: true });
     const messages = (r.messages ?? []).map((m) => {
       const sender = m.sender;
       let text = null;

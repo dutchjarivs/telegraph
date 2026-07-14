@@ -21,7 +21,8 @@ const USAGE = {
     'telegraph directory [--q QUERY] [--limit N] [--offset N]': 'browse/search the agent directory (paged)',
     'telegraph lookup <TG-address|@handle>': 'fetch and verify one agent record',
     'telegraph send <TG-address|@handle> <text>': 'send an encrypted wire (max 4000 chars)',
-    'telegraph inbox [--ack]': 'fetch (and optionally ack) your wires, decrypted',
+    'telegraph inbox [--ack] [--wait SECONDS]': 'fetch (and optionally ack) your wires, decrypted; --wait blocks until a wire lands (long-poll) instead of returning empty',
+    'telegraph listen [--wait SECONDS] [--ack false]': 'block on your mailbox and stream wires as they arrive, one JSON object per line — the agent daemon loop',
     'telegraph sent': 'your outbound history (self-sealed copies), decrypted',
     'telegraph ack --ids id1,id2': 'delete processed wires from your mailbox',
     'telegraph pricing': 'show relay pricing ($1 per 1M tokens, free tier, bundles)',
@@ -144,8 +145,38 @@ async function main() {
     }
     case 'inbox': {
       const client = loadClient();
-      const messages = await client.inbox({ ack: Boolean(opts.ack) });
+      const wait = opts.wait === undefined ? 0 : Number(opts.wait);
+      if (!Number.isFinite(wait) || wait < 0) throw new Error('--wait must be seconds (0 or more)');
+      const messages = await client.inbox({ ack: Boolean(opts.ack), wait });
       return out({ count: messages.length, acked: Boolean(opts.ack), messages });
+    }
+    case 'listen': {
+      // The agent daemon loop: block on the mailbox, print each wire as it
+      // lands, repeat. One JSON object per line (NDJSON) so it can be piped
+      // straight into another process — the other commands print one JSON
+      // document because they answer once; this one streams.
+      const client = loadClient();
+      const wait = opts.wait === undefined ? 30 : Number(opts.wait);
+      if (!Number.isFinite(wait) || wait <= 0) throw new Error('--wait must be a positive number of seconds');
+      const ack = opts.ack !== 'false' && opts.ack !== false; // acks by default: a listener has consumed the wire
+      let running = true;
+      process.on('SIGINT', () => { running = false; });
+      process.on('SIGTERM', () => { running = false; });
+      while (running) {
+        let messages;
+        try {
+          messages = await client.inbox({ ack, wait });
+        } catch (err) {
+          // A listener is a long-running process; a blip in the relay or the
+          // network shouldn't kill it. Report the error on the stream and
+          // back off, rather than exiting and losing the loop.
+          console.log(JSON.stringify({ error: err.message, status: err.status ?? null, retryingInMs: 5000 }));
+          await new Promise((r) => setTimeout(r, 5000));
+          continue;
+        }
+        for (const m of messages) console.log(JSON.stringify(m));
+      }
+      return;
     }
     case 'ack': {
       if (!opts.ids) throw new Error('--ids required (comma-separated)');

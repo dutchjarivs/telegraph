@@ -24,6 +24,11 @@ export const DEFAULT_LIMITS = {
   msgWindowMs: 10 * 60_000,
   mailboxCap: 500,
   messageTtlMs: 0, // 0 = wires never expire; > 0 drops mailbox wires older than this
+  // Long-poll: GET /v1/inbox?wait=N holds the connection until a wire lands.
+  // Capped well under the 100s idle timeout typical of proxies (cloudflared,
+  // nginx) so the relay answers before the proxy gives up on it.
+  longPollMaxMs: 60_000,
+  longPollWaiters: 8, // concurrent held inbox connections per address
   rate: { windowMs: 60_000, max: 60 },
   registerRate: { windowMs: 60 * 60_000, max: 5 }, // new identities per client IP per hour (anti-sybil)
   maxCapabilities: 16,
@@ -129,6 +134,23 @@ export function createServer({
   const registerMap = new Map();
   const reportMap = new Map();
 
+  // Long-poll waiters: address -> Set of held inbox requests, each with a
+  // wake() that is safe to call more than once. Purely in-memory and
+  // per-process: a waiter is just a parked HTTP response, so losing them on
+  // restart costs nothing (the client re-polls and gets its mail).
+  const waiters = new Map();
+
+  function notifyWaiters(address) {
+    const set = waiters.get(address);
+    if (!set?.size) return;
+    // Deferred: the sender's POST shouldn't block on the recipient's mailbox
+    // read. wake() is idempotent, so a waiter that finished in the meantime
+    // (timeout, hangup) is a no-op here.
+    setImmediate(() => {
+      for (const w of [...set]) w.wake();
+    });
+  }
+
   // Standing: how an address looks to the moderation system. Flagging is
   // derived from reports on every read (never stored), so dismissing a report
   // clears the flag with no extra bookkeeping.
@@ -211,6 +233,18 @@ export function createServer({
   }, 10 * 60_000);
   if (typeof sweepTimer.unref === 'function') sweepTimer.unref();
   server.on('close', () => clearInterval(sweepTimer));
+
+  // A held long-poll keeps its connection open, and server.close() waits for
+  // open connections — so without draining first, a single parked inbox read
+  // would stall graceful shutdown until its timer expired. Answer them all
+  // (each gets a normal, empty response), then close for real.
+  const closeServer = server.close.bind(server);
+  server.close = (cb) => {
+    for (const set of [...waiters.values()]) {
+      for (const w of [...set]) w.wake();
+    }
+    return closeServer(cb);
+  };
 
   async function handle(req, res) {
     res.setHeader('access-control-allow-origin', '*');
@@ -584,6 +618,10 @@ export function createServer({
       store.saveMailbox(to, mailbox);
       seen[id] = Date.now();
       store.saveSeen(to, seen);
+      // The wire is committed to disk — anyone long-polling this mailbox can
+      // have it now. Only real deliveries wake waiters: duplicates and rejected
+      // wires return earlier and never reach this line.
+      notifyWaiters(to);
       if (sentCopy) {
         store.appendSent(from, {
           id,
@@ -608,15 +646,61 @@ export function createServer({
     if (route === 'GET /v1/inbox') {
       const auth = checkAuth(req, url.pathname, sha256hex(''));
       if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
-      const mailbox = loadMailbox(auth.address);
-      const messages = mailbox.map(({ senderRecord, ...m }) => ({
-        ...m,
-        // Live record first (fresh bio/handle), delivery-time snapshot as the
-        // fallback so wires stay decryptable after the sender is removed.
-        // Decoration warns recipients when the sender has since been flagged.
-        sender: decorateAgent(store.getAgent(m.from)) ?? senderRecord ?? null,
-      }));
-      return send(res, 200, { count: messages.length, messages });
+
+      const respond = () => {
+        const mailbox = loadMailbox(auth.address);
+        const messages = mailbox.map(({ senderRecord, ...m }) => ({
+          ...m,
+          // Live record first (fresh bio/handle), delivery-time snapshot as the
+          // fallback so wires stay decryptable after the sender is removed.
+          // Decoration warns recipients when the sender has since been flagged.
+          sender: decorateAgent(store.getAgent(m.from)) ?? senderRecord ?? null,
+        }));
+        send(res, 200, { count: messages.length, messages });
+      };
+
+      // ?wait=N (seconds) turns the read into a long-poll: hold the connection
+      // until a wire lands, then answer immediately. Without it an agent has to
+      // busy-poll, which burns requests and adds latency to every message. The
+      // query string is deliberately outside the signed auth payload (which
+      // covers the pathname only), so this stays compatible with clients that
+      // already sign requests the old way.
+      const waitMs = parseWaitMs(url.searchParams.get('wait'), LIMITS.longPollMaxMs);
+      if (waitMs === null) {
+        return send(res, 400, { error: 'bad_wait', hint: `wait is seconds to hold the connection, 0–${LIMITS.longPollMaxMs / 1000}` });
+      }
+      // Mail already waiting, or a plain non-blocking read: answer now.
+      if (waitMs === 0 || loadMailbox(auth.address).length) return respond();
+
+      const set = waiters.get(auth.address) ?? new Set();
+      if (set.size >= LIMITS.longPollWaiters) {
+        return send(res, 429, {
+          error: 'too_many_waiters',
+          hint: `max ${LIMITS.longPollWaiters} concurrent long-polls per address — one listener per agent is enough`,
+        });
+      }
+      waiters.set(auth.address, set);
+
+      let timer;
+      let done = false;
+      // One exit for all three ways out — wire arrives, timer fires, client
+      // hangs up — so the waiter is always unregistered exactly once and we
+      // never write to a socket the client already closed.
+      const finish = (reply) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        set.delete(waiter);
+        if (!set.size) waiters.delete(auth.address);
+        req.off('close', onHangup);
+        if (reply) respond();
+      };
+      const onHangup = () => finish(false);
+      const waiter = { wake: () => finish(true) };
+      timer = setTimeout(() => finish(true), waitMs); // timed out: answer with count 0
+      set.add(waiter);
+      req.on('close', onHangup);
+      return;
     }
 
     if (route === 'GET /v1/sent') {
@@ -1151,6 +1235,18 @@ function parseJson(raw) {
   } catch {
     return null;
   }
+}
+
+// ?wait=N — seconds to hold an inbox read open. Absent/empty means a plain
+// non-blocking read (0). Garbage returns null so the caller can 400 rather
+// than silently degrade a typo'd wait into a busy-poll. Over the cap clamps
+// down instead of erroring: asking to wait longer than the relay allows is a
+// reasonable request, it just gets the relay's maximum.
+function parseWaitMs(raw, maxMs) {
+  if (raw === null || raw === '') return 0;
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || seconds < 0) return null;
+  return Math.min(Math.round(seconds * 1000), maxMs);
 }
 
 function freshTs(ts, windowMs) {
