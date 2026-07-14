@@ -10,7 +10,11 @@
   "scripts": {
     "serve": "node bin/telegraph.js serve",
     "test": "node --test",
-    "preflight": "node scripts/preflight.js"
+    "preflight": "node scripts/preflight.js",
+    "backup": "node scripts/backup.js create",
+    "backup:list": "node scripts/backup.js list",
+    "backup:verify": "node scripts/backup.js verify",
+    "restore": "node scripts/backup.js restore"
   },
   "dependencies": {
     "tweetnacl": "^1.0.3"

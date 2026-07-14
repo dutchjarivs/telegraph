@@ -176,19 +176,66 @@ separate keys, separate webhook, separate signing secret. Do NOT reuse the
 
 ## 7. Backups
 
-The entire relay state is the `data/` directory (agent records, mailboxes,
-billing ledger, payments). Back it up; losing it means losing balances.
+The entire relay state is the `data/` directory: agent records, mailboxes,
+billing ledger, payments. `billing.json` holds credits people paid real money
+for, and the mailboxes hold undelivered mail that exists nowhere else. Lose the
+disk without a backup and none of it can be reconstructed.
+
+```bash
+npm run backup              # snapshot data/ → backups/  (safe while the relay runs)
+npm run backup:list         # what you've got, newest first
+npm run backup:verify       # prove the newest backup is intact
+npm run restore             # put it back (relay must be stopped)
+```
+
+A backup is one gzipped JSON document with a SHA-256 per file. `npm run backup`
+takes the snapshot, reads it back off disk, and verifies every checksum before
+reporting success — if the bytes didn't land, you find out now rather than on
+the worst day of the year. Snapshots are safe to take while the relay is
+serving: every file is written tmp-then-rename, so a reader always sees a whole
+file. If the relay writes mid-snapshot the tool retries, and tells you if it
+couldn't get a clean one.
+
+Daily, with a verify:
 
 ```bash
 sudo tee /etc/cron.daily/telegraph-backup >/dev/null <<'CRON'
 #!/bin/sh
-ts=$(date +%F)
-tar czf "/home/telegraph/backups/data-$ts.tar.gz" -C /home/telegraph/app data
-find /home/telegraph/backups -name 'data-*.tar.gz' -mtime +14 -delete
+cd /home/telegraph/app || exit 1
+sudo -u telegraph npm run backup --silent || exit 1
+sudo -u telegraph npm run backup:verify --silent   # a backup nobody verifies is a rumour
 CRON
-sudo mkdir -p /home/telegraph/backups && sudo chown telegraph:telegraph /home/telegraph/backups
 sudo chmod +x /etc/cron.daily/telegraph-backup
 ```
+
+Both commands exit non-zero on failure, so cron will mail you when it breaks.
+`TELEGRAPH_BACKUP_KEEP` (default 30) controls how many snapshots are kept.
+
+**Secrets are deliberately not in the backup.** `.env`, `.admin-token` and
+`.stripe-webhook-secret` never enter it. Backups get copied to laptops, object
+storage and chat threads; one carrying the admin token would make every copy a
+key to the relay. Those three files are small and change almost never — put
+them in a password manager. A full recovery is: restore the backup, put those
+three back, start the relay.
+
+### Restoring
+
+```bash
+sudo systemctl stop telegraph      # required — see below
+npm run restore -- --dry-run       # show exactly what would change
+npm run restore                    # or: npm run restore -- backups/telegraph-<stamp>.json.gz
+sudo systemctl start telegraph
+```
+
+The relay **must be stopped first**, and the tool refuses to run if it can still
+reach one. This isn't caution: the relay loads the whole data set into memory at
+startup and rewrites each file wholesale, so restoring underneath a live relay
+gets silently reverted by its next write — and you'd walk away believing the
+data was back when it was already gone again.
+
+Restore replaces rather than merges, and it snapshots the current `data/` to
+`backups/pre-restore-*.json.gz` before touching anything, so restoring the wrong
+backup is not a one-way door.
 
 ## 8. Updating
 

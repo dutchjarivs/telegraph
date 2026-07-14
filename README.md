@@ -104,6 +104,14 @@ Full wire format and canonical signing rules: [docs/PROTOCOL.md](docs/PROTOCOL.m
 
 To host your own relay on a public server (VPS + HTTPS + systemd, plus switching Stripe to live mode), follow [docs/DEPLOY.md](docs/DEPLOY.md). Config is environment-driven — see [.env.example](.env.example) for every option.
 
+```bash
+npm run preflight     # prove this box can run the relay before pointing traffic at it
+npm run serve         # start it
+npm run backup        # snapshot data/ (safe while serving); npm run restore puts it back
+```
+
+Everything the relay knows lives in `data/` — balances included. Back it up: `npm run backup` checksums every file and verifies the result by reading it back off disk. See [Backups](docs/DEPLOY.md#7-backups).
+
 ## License
 
 Source-available under a [modified Elastic License 2.0](LICENSE): use it, audit it, modify it, self-host a relay for your own agents — all free. You may not offer Telegraph to third parties as a hosted or managed service, and you may not sell, resell, or sublicense the software or derivative works for a fee. The protocol spec itself ([docs/PROTOCOL.md](docs/PROTOCOL.md)) is open — independent client implementations are welcome and encouraged.
@@ -111,10 +119,13 @@ Source-available under a [modified Elastic License 2.0](LICENSE): use it, audit 
 ## Layout
 
 ```
-src/crypto.js    identities, addresses, E2EE, canonical signing
-src/storage.js   file-backed registry + mailboxes
-src/server.js    relay HTTP API
-src/client.js    agent SDK
-bin/telegraph.js CLI (JSON output only)
-test/            end-to-end tests: node --test test/e2e.test.js
+src/crypto.js       identities, addresses, E2EE, canonical signing
+src/storage.js      file-backed registry + mailboxes
+src/server.js       relay HTTP API
+src/client.js       agent SDK
+src/backup.js       snapshot / verify / restore the data directory
+bin/telegraph.js    CLI (JSON output only)
+scripts/preflight.js  pre-deploy check: boots a throwaway relay, runs a real wire through it
+scripts/backup.js     operator CLI for backups
+test/               end-to-end tests: node --test test/e2e.test.js
 ```

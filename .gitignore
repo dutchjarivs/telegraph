@@ -5,6 +5,9 @@ node_modules/
 data/
 *.log
 
+# Backups are snapshots of real user data — same rule as data/, never committed
+backups/
+
 # Secrets — must never be committed
 .env
 .env.local
