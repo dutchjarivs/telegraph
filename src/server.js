@@ -39,6 +39,8 @@ export const DEFAULT_LIMITS = {
   sentLogCap: 200, // self-sealed sent copies kept per agent (ring buffer, not billed)
   reportRate: { windowMs: 24 * 60 * 60_000, max: 20 }, // abuse reports per reporter per day
   reportCommentChars: 500,
+  maxBlocks: 1000, // addresses one agent can block (bounds the stored list)
+  blockNoteChars: 200,
   // Distinct reporters (non-dismissed reports) before an agent is publicly
   // flagged in the directory. Reports need cryptographic evidence of a wire
   // from the reported sender, so false-flagging requires the target to have
@@ -560,6 +562,23 @@ export function createServer({
       if (!allowRate(from)) {
         return send(res, 429, { error: 'rate_limited', hint: `max ${LIMITS.rate.max} wires/min` });
       }
+      // Recipient's personal block list. Checked after the signature (so nobody
+      // can probe who blocked whom without holding the sender's key) and after
+      // the rate limit (so a blocked sender hammering the relay still burns
+      // their own budget), but before the mailbox and the meter: a blocked wire
+      // is never stored and never charged.
+      //
+      // The rejection is explicit, not a silent blackhole. Quietly accepting a
+      // wire we intend to drop would mean answering "ok" to a sender whose
+      // message will never arrive — and billing them for it. Telling a spammer
+      // they're blocked costs little (they can rotate keys regardless); lying to
+      // an honest sender costs the relay its trustworthiness.
+      if (store.isBlocked(to, from)) {
+        return send(res, 403, {
+          error: 'recipient_blocked_sender',
+          hint: 'the recipient has blocked this address — the wire was not delivered and you were not charged',
+        });
+      }
       const mailbox = loadMailbox(to);
       // Duplicate check before the cap check: resending an already-delivered
       // wire into a full mailbox is still a duplicate, not a 507.
@@ -858,6 +877,69 @@ export function createServer({
       return send(res, 200, { count: reports.length, reports });
     }
 
+    // Personal blocks. Reporting is community moderation — it needs three
+    // distinct victims before anything happens, and the operator decides.
+    // Blocking is the control an agent has over its own doorbell: one spammer,
+    // one victim, effective immediately, nobody else's permission required.
+    if (route === 'POST /v1/blocks') {
+      const raw = await readRaw(req);
+      const auth = checkAuth(req, url.pathname, sha256hex(raw));
+      if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
+      const body = parseJson(raw);
+      if (!body) return send(res, 400, { error: 'bad_json' });
+      const { address, note = '' } = body;
+      if (typeof address !== 'string' || !TG_ADDRESS_RE.test(address)) {
+        return send(res, 400, { error: 'bad_address', hint: 'address must be a TG- address — resolve a @handle first via GET /v1/agents/@handle' });
+      }
+      if (address === auth.address) {
+        return send(res, 400, { error: 'cannot_block_self' });
+      }
+      if (typeof note !== 'string' || note.length > LIMITS.blockNoteChars) {
+        return send(res, 400, { error: 'bad_note', hint: `optional string, max ${LIMITS.blockNoteChars} chars` });
+      }
+      const existing = store.getBlocks(auth.address);
+      // Re-blocking someone already blocked is idempotent, so it must not count
+      // against the cap or the cap would creep up on repeated calls.
+      if (!Object.hasOwn(existing, address) && Object.keys(existing).length >= LIMITS.maxBlocks) {
+        return send(res, 507, { error: 'too_many_blocks', hint: `max ${LIMITS.maxBlocks} blocked addresses` });
+      }
+      // Deliberately not required to be registered: an address derives from a
+      // keypair, so a blocked agent can't shed the block by removing itself and
+      // re-registering, and you can block an address you've only seen quoted.
+      store.setBlock(auth.address, address, { at: Date.now(), note });
+      return send(res, 200, { ok: true, blocked: address, count: Object.keys(store.getBlocks(auth.address)).length });
+    }
+
+    if (route === 'POST /v1/blocks/remove') {
+      const raw = await readRaw(req);
+      const auth = checkAuth(req, url.pathname, sha256hex(raw));
+      if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
+      const body = parseJson(raw);
+      if (!body) return send(res, 400, { error: 'bad_json' });
+      const { address } = body;
+      if (typeof address !== 'string' || !TG_ADDRESS_RE.test(address)) {
+        return send(res, 400, { error: 'bad_address', hint: 'address must be a TG- address' });
+      }
+      const removed = store.removeBlock(auth.address, address);
+      if (!removed) return send(res, 404, { error: 'not_blocked', hint: 'that address is not on your block list' });
+      return send(res, 200, { ok: true, unblocked: address, count: Object.keys(store.getBlocks(auth.address)).length });
+    }
+
+    if (route === 'GET /v1/blocks') {
+      const auth = checkAuth(req, url.pathname, sha256hex(''));
+      if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
+      const list = store.getBlocks(auth.address);
+      const blocks = Object.entries(list).map(([address, entry]) => ({
+        address,
+        at: entry.at,
+        note: entry.note ?? '',
+        // Best-effort: who this was, if they're still registered here.
+        handle: store.getAgent(address)?.handle ?? null,
+      }));
+      blocks.sort((a, b) => b.at - a.at);
+      return send(res, 200, { count: blocks.length, blocks });
+    }
+
     if (route === 'POST /v1/webhooks/stripe') {
       if (!stripeWebhookSecret) {
         return send(res, 403, { error: 'stripe_disabled', hint: 'relay has no STRIPE_WEBHOOK_SECRET configured' });
@@ -1120,12 +1202,15 @@ export function createServer({
         'GET /v1/directory?q=',
         'GET /v1/agents/{address|@handle}',
         'POST /v1/messages',
-        'GET /v1/inbox (signed)',
+        'GET /v1/inbox?wait=N (signed — wait=N seconds long-polls until a wire lands)',
         'POST /v1/inbox/ack (signed)',
         'GET /v1/sent (signed)',
         'GET /v1/credits (signed)',
         'POST /v1/reports (signed — report a received wire as spam/scam)',
         'GET /v1/reports/mine (signed)',
+        'POST /v1/blocks (signed — stop an address from wiring you)',
+        'POST /v1/blocks/remove (signed)',
+        'GET /v1/blocks (signed)',
         'GET /owner (owner console UI)',
         'POST /v1/credits/grant (admin)',
         'GET /v1/admin/overview (admin)',

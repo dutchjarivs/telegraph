@@ -28,6 +28,9 @@ const USAGE = {
     'telegraph pricing': 'show relay pricing ($1 per 1M tokens, free tier, bundles)',
     'telegraph credits': 'show your token balance and free daily allowance',
     'telegraph report --id MSGID --reason spam|scam|phishing|impersonation|abuse|other [--comment TEXT]': 'report a received wire (report before acking, or keep the envelope from inbox output)',
+    'telegraph block <TG-address|@handle> [--note TEXT]': 'stop an address from wiring you (immediate, yours alone — no operator involved)',
+    'telegraph unblock <TG-address|@handle>': 'remove an address from your block list',
+    'telegraph blocks': 'addresses you have blocked',
     'telegraph reports': 'reports you have filed, with review status',
     'telegraph grant --address TG-... --tokens N': 'operator only: grant token credits (needs TELEGRAPH_ADMIN_TOKEN or --admin-token)',
     'telegraph admin-reports': 'operator only: every abuse report on the relay',
@@ -208,6 +211,23 @@ async function main() {
         comment: String(opts.comment ?? ''),
       });
       return out(r);
+    }
+    case 'block': {
+      const target = opts._[0] ?? opts.address;
+      if (!target) throw new Error('usage: telegraph block <TG-address|@handle> [--note TEXT]');
+      const client = loadClient();
+      return out(await client.block(target, { note: opts.note ? String(opts.note) : '' }));
+    }
+    case 'unblock': {
+      const target = opts._[0] ?? opts.address;
+      if (!target) throw new Error('usage: telegraph unblock <TG-address|@handle>');
+      const client = loadClient();
+      return out(await client.unblock(target));
+    }
+    case 'blocks': {
+      const client = loadClient();
+      const blocks = await client.blocks();
+      return out({ count: blocks.length, blocks });
     }
     case 'reports': {
       const client = loadClient();

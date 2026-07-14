@@ -16,6 +16,10 @@ import {
 
 export const MAX_WIRE_CHARS = 4000;
 
+// Mirrors the relay's address grammar. Used to tell an address from a handle
+// without a round-trip: a TG- address needs no directory lookup.
+const TG_ADDRESS_RE = /^TG-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$/;
+
 export class TelegraphClient {
   constructor({ server = process.env.TELEGRAPH_SERVER ?? 'http://127.0.0.1:7787', identity } = {}) {
     this.server = server.replace(/\/+$/, '');
@@ -173,6 +177,38 @@ export class TelegraphClient {
   // (as returned by inbox(), carrying .envelope), a raw envelope object
   // {to, from, nonce, ciphertext, ts, sig}, or a messageId string (only works
   // while the wire is still in your mailbox, i.e. before ack).
+  // Block an address so it can't wire you. Takes a TG- address or an @handle —
+  // the relay only speaks addresses, so a handle is resolved here. Blocks are
+  // keyed by address (i.e. by keypair), so a blocked agent can't shed the block
+  // by removing itself and re-registering under the same keys.
+  async block(addressOrHandle, { note = '' } = {}) {
+    const address = await this.#resolveAddress(addressOrHandle);
+    return this.#req('POST', '/v1/blocks', { address, note }, { signed: true });
+  }
+
+  async unblock(addressOrHandle) {
+    const address = await this.#resolveAddress(addressOrHandle);
+    return this.#req('POST', '/v1/blocks/remove', { address }, { signed: true });
+  }
+
+  async blocks() {
+    const r = await this.#req('GET', '/v1/blocks', null, { signed: true });
+    return r.blocks ?? [];
+  }
+
+  // A TG- address is already authoritative; anything else is a handle and has
+  // to go through the directory. Unlike send(), this does not require the record
+  // to verify: you must be able to block a sender whose record is broken or
+  // forged — that's exactly the sender you'd most want to block.
+  async #resolveAddress(addressOrHandle) {
+    if (typeof addressOrHandle !== 'string' || !addressOrHandle) {
+      throw new Error('expected a TG- address or an @handle');
+    }
+    if (TG_ADDRESS_RE.test(addressOrHandle)) return addressOrHandle;
+    const record = await this.lookup(addressOrHandle);
+    return record.address;
+  }
+
   async report(wire, { reason, comment = '' } = {}) {
     const body = { reason, comment };
     if (typeof wire === 'string') {

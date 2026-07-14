@@ -38,6 +38,42 @@ export class Storage {
     this.moderation = fs.existsSync(this.moderationFile)
       ? JSON.parse(fs.readFileSync(this.moderationFile, 'utf8'))
       : {};
+    // Personal block lists: { blockerAddress: { blockedAddress: {at, note} } }.
+    // Distinct from moderation — that's the operator's call on an agent's right
+    // to send at all; this is one agent's own doorbell. Keyed by address, so a
+    // block follows the keypair through removal and re-registration.
+    this.blocksFile = path.join(dataDir, 'blocks.json');
+    this.blocks = fs.existsSync(this.blocksFile)
+      ? JSON.parse(fs.readFileSync(this.blocksFile, 'utf8'))
+      : {};
+  }
+
+  // hasOwn throughout: a bare lookup on "__proto__" or "constructor" would
+  // otherwise resolve to a prototype member and report a block that isn't there.
+  getBlocks(blocker) {
+    return Object.hasOwn(this.blocks, blocker) ? this.blocks[blocker] : {};
+  }
+
+  isBlocked(blocker, sender) {
+    const list = this.getBlocks(blocker);
+    return Object.hasOwn(list, sender);
+  }
+
+  setBlock(blocker, blocked, entry) {
+    const list = this.getBlocks(blocker);
+    list[blocked] = entry;
+    this.blocks[blocker] = list;
+    atomicWrite(this.blocksFile, JSON.stringify(this.blocks, null, 2));
+  }
+
+  removeBlock(blocker, blocked) {
+    const list = this.getBlocks(blocker);
+    if (!Object.hasOwn(list, blocked)) return false;
+    delete list[blocked];
+    if (Object.keys(list).length) this.blocks[blocker] = list;
+    else delete this.blocks[blocker];
+    atomicWrite(this.blocksFile, JSON.stringify(this.blocks, null, 2));
+    return true;
   }
 
   getReport(id) {
