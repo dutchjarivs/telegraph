@@ -340,6 +340,7 @@ function render(o) {
       : 'no flagged or suspended agents'),
     tile('Revenue credited', usd(t.payments.creditedCents), `${t.payments.count} payment${t.payments.count === 1 ? '' : 's'} via Stripe`),
     tile('Mailbox backlog', full(t.mailboxBacklog), `queued wires, cap ${full(o.limits.mailboxCap)}/box`),
+    tile('Quotas active', full(o.quotas?.agentsWithQuota ?? 0), 'agents with per-sender daily limits'),
   ];
   // Live traffic metrics (present on relays that report them). Labeled "since
   // relay start" because they are in-memory counters reset on restart.
