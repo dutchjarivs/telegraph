@@ -11,8 +11,15 @@ export class Storage {
     // Sent log: self-sealed copies of outbound wires (sender's own history).
     // The relay can't read these either — they're nacl.box'd to the sender.
     this.sentDir = path.join(dataDir, 'sent');
+    // Idempotency ledger, one file per *sender*: { key: {id, at} }. A client
+    // that retries a send with the same key (e.g. after a network blip that
+    // dropped the response) gets the original wire's id back instead of a
+    // second delivery and a second charge. Keyed by sender because the sender
+    // chooses the key; distinct from the recipient-keyed `seen` replay ledger.
+    this.idempotencyDir = path.join(dataDir, 'idempotency');
     fs.mkdirSync(this.mailboxDir, { recursive: true });
     fs.mkdirSync(this.sentDir, { recursive: true });
+    fs.mkdirSync(this.idempotencyDir, { recursive: true });
     this.agents = fs.existsSync(this.agentsFile)
       ? JSON.parse(fs.readFileSync(this.agentsFile, 'utf8'))
       : {};
@@ -153,6 +160,8 @@ export class Storage {
     if (fs.existsSync(seen)) fs.rmSync(seen);
     const sent = this.sentFile(address);
     if (fs.existsSync(sent)) fs.rmSync(sent);
+    const idem = this.idempotencyFile(address);
+    if (fs.existsSync(idem)) fs.rmSync(idem);
     return agent;
   }
 
@@ -202,6 +211,20 @@ export class Storage {
 
   saveSeen(address, seen) {
     atomicWrite(this.seenFile(address), JSON.stringify(seen));
+  }
+
+  // Per-sender idempotency ledger. Same disk-name sanitisation as mailboxes.
+  idempotencyFile(address) {
+    return path.join(this.idempotencyDir, address.replace(/[^A-Za-z0-9-]/g, '') + '.json');
+  }
+
+  loadIdempotency(address) {
+    const file = this.idempotencyFile(address);
+    return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
+  }
+
+  saveIdempotency(address, obj) {
+    atomicWrite(this.idempotencyFile(address), JSON.stringify(obj));
   }
 
   loadMailbox(address) {

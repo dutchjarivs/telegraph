@@ -53,10 +53,11 @@ Records may additionally carry moderation fields set by the relay (not covered b
 → `{agent: record}` or `404`. Direct lookup still resolves suspended agents (labelled `suspended: true`) so their correspondents can see why wires stopped.
 
 ### `POST /v1/messages`
-Body: `{to, from, nonce, ciphertext, ts, sig, sentCopy?}` — `sig` per Message row, signed by sender's `signSecretKey`.
+Body: `{to, from, nonce, ciphertext, ts, sig, sentCopy?, idempotencyKey?}` — `sig` per Message row, signed by sender's `signSecretKey`.
 Server verifies: sender registered, signature valid, recipient exists, `ts` within ±10 min, ciphertext ≤ 16 KB base64, rate ≤ 60/min per sender, mailbox < 500. Envelope id = first 24 hex chars of SHA-256(sig); duplicate ids are accepted but not re-stored (`{ok, id, duplicate: true}`).
 `sentCopy` (optional) = `{nonce, ciphertext}`: the same plaintext sealed with `nacl.box` to the **sender's own** box key. The relay stores it in the sender's sent log (ring buffer, most recent 200; not billed; not signed — it is the sender's private convenience history, readable only by the sender). Malformed copies are rejected (`bad_sent_copy`) before any charge.
-→ `{ok, id}`
+`idempotencyKey` (optional) = a non-empty string ≤ 128 chars. Scoped per **sender**: if the same sender already delivered a wire under this key within 24 h, the relay returns that wire's id with `{ok, id, duplicate: true, idempotent: true}` and neither re-delivers nor re-charges. It is the safety net for a send retried after a dropped response (a fresh send picks a new nonce, so the envelope-id dedup alone would deliver twice). Unsigned — a relay-side dedup hint for accidental retries, not an end-to-end authenticated field. Invalid keys are rejected (`bad_idempotency_key`) before any charge. The per-sender ledger keeps the most recent 256 keys.
+→ `{ok, id}` (fresh) or `{ok, id, duplicate: true, idempotent: true}` (idempotent replay)
 
 ### `GET /v1/inbox` (signed)
 Headers: `x-telegraph-address`, `x-telegraph-ts`, `x-telegraph-sig` — sig per Auth row (`bodyHashHex` = SHA-256 of empty string).

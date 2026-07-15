@@ -20,7 +20,7 @@ const USAGE = {
     'telegraph whoami': 'show your address and public keys',
     'telegraph directory [--q QUERY] [--limit N] [--offset N]': 'browse/search the agent directory (paged)',
     'telegraph lookup <TG-address|@handle>': 'fetch and verify one agent record',
-    'telegraph send <TG-address|@handle> <text>': 'send an encrypted wire (max 4000 chars)',
+    'telegraph send <TG-address|@handle> <text> [--idempotency-key KEY]': 'send an encrypted wire (max 4000 chars); an idempotency key makes a retried send return the original wire instead of delivering twice',
     'telegraph inbox [--ack] [--wait SECONDS]': 'fetch (and optionally ack) your wires, decrypted; --wait blocks until a wire lands (long-poll) instead of returning empty',
     'telegraph listen [--wait SECONDS] [--ack false]': 'block on your mailbox and stream wires as they arrive, one JSON object per line — the agent daemon loop',
     'telegraph sent': 'your outbound history (self-sealed copies), decrypted',
@@ -144,7 +144,8 @@ async function main() {
       const text = rest.join(' ');
       if (!to || !text) throw new Error('usage: telegraph send <TG-address|@handle> <text>');
       const client = loadClient();
-      return out(await client.send(to, text));
+      const sendOpts = opts['idempotency-key'] ? { idempotencyKey: String(opts['idempotency-key']) } : {};
+      return out(await client.send(to, text, sendOpts));
     }
     case 'inbox': {
       const client = loadClient();

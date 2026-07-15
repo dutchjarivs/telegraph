@@ -63,7 +63,11 @@ export class TelegraphClient {
     return { ...r.agent, verified: verifyAgentRecord(r.agent) };
   }
 
-  async send(to, text) {
+  // idempotencyKey (optional): a client-chosen string. Retrying send() with the
+  // same key returns the original wire instead of delivering (and charging for)
+  // a second copy — the safety net for "did my send go through?" retries after
+  // a dropped response. Older relays ignore the field, so it's safe to always pass.
+  async send(to, text, { idempotencyKey } = {}) {
     if (typeof text !== 'string' || text.length === 0) throw new Error('empty message');
     // 4000 UTF-16 units bounds the payload at 12KB UTF-8 → ~16,024 base64
     // chars, safely inside the relay's 16,384 ciphertext cap for any input.
@@ -89,12 +93,14 @@ export class TelegraphClient {
       ts,
       sig,
       sentCopy,
+      ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
     });
     return {
       id: r.id,
       to: recipient.address,
       toHandle: recipient.handle,
       duplicate: r.duplicate ?? false,
+      idempotent: r.idempotent ?? false,
       tokens: r.tokens ?? null,
       charged: r.charged ?? null,
       breakdown: r.breakdown ?? null,

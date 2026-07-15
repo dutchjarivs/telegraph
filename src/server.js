@@ -46,6 +46,9 @@ export const DEFAULT_LIMITS = {
   sentLogCap: 200, // self-sealed sent copies kept per agent (ring buffer, not billed)
   reportRate: { windowMs: 24 * 60 * 60_000, max: 20 }, // abuse reports per reporter per day
   reportCommentChars: 500,
+  idempotencyKeyChars: 128, // max length of a client-supplied idempotency key
+  idempotencyLedgerCap: 256, // retained keys per sender (ring buffer, oldest roll off)
+  idempotencyTtlMs: 24 * 60 * 60_000, // a key dedups retries for 24h, then expires
   maxBlocks: 1000, // addresses one agent can block (bounds the stored list)
   blockNoteChars: 200,
   // Distinct reporters (non-dismissed reports) before an agent is publicly
@@ -518,7 +521,7 @@ export function createServer({
       const raw = await readRaw(req);
       const body = parseJson(raw);
       if (!body) return send(res, 400, { error: 'bad_json' });
-      const { to, from, nonce, ciphertext, ts, sig, sentCopy } = body;
+      const { to, from, nonce, ciphertext, ts, sig, sentCopy, idempotencyKey } = body;
       const missing = ['to', 'from', 'nonce', 'ciphertext', 'ts', 'sig'].filter(
         (k) => body[k] === undefined || body[k] === null || body[k] === '',
       );
@@ -553,6 +556,15 @@ export function createServer({
           typeof sentCopy.nonce !== 'string' || safeB64Len(sentCopy.nonce) !== 24
         ) {
           return send(res, 400, { error: 'bad_sent_copy', hint: 'sentCopy is {nonce, ciphertext}: the wire sealed to your own box key' });
+        }
+      }
+      // Optional idempotency key: a client-chosen string that lets a retried
+      // send (same key) collapse to the first delivery instead of a second
+      // wire + a second charge. Unsigned on purpose — it's a relay-side dedup
+      // hint for accidental retries, not an end-to-end authenticated field.
+      if (idempotencyKey !== undefined) {
+        if (typeof idempotencyKey !== 'string' || idempotencyKey.length === 0 || idempotencyKey.length > LIMITS.idempotencyKeyChars) {
+          return send(res, 400, { error: 'bad_idempotency_key', hint: `idempotencyKey is a non-empty string up to ${LIMITS.idempotencyKeyChars} chars` });
         }
       }
       if (!freshTs(ts, LIMITS.msgWindowMs)) {
@@ -593,6 +605,28 @@ export function createServer({
           error: 'recipient_blocked_sender',
           hint: 'the recipient has blocked this address — the wire was not delivered and you were not charged',
         });
+      }
+      // Idempotency short-circuit. If this sender already delivered a wire under
+      // this key (within the TTL), return that wire's id and re-charge nothing.
+      // Keys are namespaced with a 'k:' prefix so a hostile key like "__proto__"
+      // becomes an ordinary own property instead of touching the prototype.
+      let idem = null;
+      if (idempotencyKey !== undefined) {
+        idem = store.loadIdempotency(from);
+        const idemCutoff = Date.now() - LIMITS.idempotencyTtlMs;
+        let idemPruned = false;
+        for (const [k, rec] of Object.entries(idem)) {
+          if (!rec || typeof rec.at !== 'number' || rec.at < idemCutoff) {
+            delete idem[k];
+            idemPruned = true;
+          }
+        }
+        const idemKey = 'k:' + idempotencyKey;
+        if (Object.hasOwn(idem, idemKey)) {
+          if (idemPruned) store.saveIdempotency(from, idem);
+          return send(res, 200, { ok: true, id: idem[idemKey].id, duplicate: true, idempotent: true });
+        }
+        if (idemPruned) store.saveIdempotency(from, idem);
       }
       const mailbox = loadMailbox(to);
       // Duplicate check before the cap check: resending an already-delivered
@@ -652,6 +686,18 @@ export function createServer({
       store.saveMailbox(to, mailbox);
       seen[id] = Date.now();
       store.saveSeen(to, seen);
+      // Record the idempotency key now that the wire is committed — never
+      // before, so a send that failed a check (e.g. 402) can still be retried.
+      // Cap the ledger as a ring buffer: oldest keys roll off past the cap.
+      if (idempotencyKey !== undefined) {
+        idem['k:' + idempotencyKey] = { id, at: Date.now() };
+        const keys = Object.keys(idem);
+        if (keys.length > LIMITS.idempotencyLedgerCap) {
+          keys.sort((a, b) => idem[a].at - idem[b].at);
+          for (const k of keys.slice(0, keys.length - LIMITS.idempotencyLedgerCap)) delete idem[k];
+        }
+        store.saveIdempotency(from, idem);
+      }
       // The wire is committed to disk — anyone long-polling this mailbox can
       // have it now. Only real deliveries wake waiters: duplicates and rejected
       // wires return earlier and never reach this line.
