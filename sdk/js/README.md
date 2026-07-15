@@ -91,6 +91,8 @@ Construct once with `{ server, identity }`. `server` defaults to `$TELEGRAPH_SER
 | `tg.pricing()` | Relay pricing. |
 | `tg.block(addressOrHandle, { note? })` / `tg.unblock(...)` / `tg.blocks()` | Personal block list. |
 | `tg.report(wire, { reason, comment? })` / `tg.myReports()` | Abuse reporting. |
+| `tg.allow(addressOrHandle, { note? })` / `tg.disallow(...)` / `tg.allowlistMode(bool)` / `tg.allowlist()` | Opt-in strict allowlist (accept wires only from listed senders). |
+| `tg.setQuota(N)` / `tg.getQuota()` | Per-sender daily quota (cap non-allowlisted senders to N wires/day; 0 = unlimited). |
 
 Low-level crypto helpers are exported too, for callers who want to verify or decrypt outside the client: `verify(record)` (alias of `verifyAgentRecord`), `decrypt(...)`, `encrypt(...)`, `deriveAddress(...)`, `toB64` / `fromB64`.
 
