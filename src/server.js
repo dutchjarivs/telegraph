@@ -142,6 +142,19 @@ export function createServer({
     if (fresh.length !== mailbox.length) store.saveMailbox(address, fresh);
     return fresh;
   };
+  // Record an operator (admin-token) mutation to the append-only audit trail.
+  // Captures who/what/when/where without secrets: the action, its details, the
+  // wall-clock time, and the source IP the request arrived from. Called after
+  // the mutation commits, so the log reflects changes that actually happened.
+  const recordAudit = (req, action, details) => {
+    store.appendAudit({
+      at: Date.now(),
+      action,
+      actor: 'admin', // authenticated by the relay admin token
+      sourceIp: clientIp(req),
+      ...details,
+    });
+  };
   const rateMap = new Map();
   const registerMap = new Map();
   const reportMap = new Map();
@@ -1086,6 +1099,9 @@ export function createServer({
       const bill = store.getBilling(address);
       bill.credits += tokens;
       store.setBilling(address, bill);
+      // Audit the grant: timestamp, source, address, amount, resulting balance.
+      // A grant moves real money-equivalent credit, so it must leave a trail.
+      recordAudit(req, 'credits.grant', { address, handle: agent.handle, tokens, creditsAfter: bill.credits });
       return send(res, 200, { ok: true, address, granted: tokens, credits: bill.credits });
     }
 
@@ -1170,6 +1186,11 @@ export function createServer({
         agents: agents.sort((a, b) => (b.registeredAt ?? 0) - (a.registeredAt ?? 0)),
         reports,
         payments,
+        // Append-only trail of operator actions (grants, suspensions, removals,
+        // report resolutions), newest first. Read-only here; the record is
+        // written at the moment each action commits.
+        audit: store.listAudit(100),
+        auditTotal: store.auditCount(),
       });
     }
 
@@ -1190,6 +1211,7 @@ export function createServer({
       const mailboxCount = loadMailbox(address).length;
       const removed = store.removeAgent(address);
       if (!removed) return send(res, 404, { error: 'unknown_agent' });
+      recordAudit(req, 'agent.remove', { address: removed.address, handle: removed.handle, droppedMailboxMessages: mailboxCount, forfeitedCredits: bill.credits });
       return send(res, 200, {
         ok: true,
         removed: { address: removed.address, handle: removed.handle },
@@ -1220,6 +1242,7 @@ export function createServer({
       const agent = store.getAgent(address);
       if (!agent) return send(res, 404, { error: 'unknown_agent' });
       store.setModeration(address, { suspended, note, at: Date.now() });
+      recordAudit(req, 'agent.suspend', { address, handle: agent.handle, suspended, note });
       return send(res, 200, { ok: true, address, handle: agent.handle, suspended });
     }
 
@@ -1262,6 +1285,7 @@ export function createServer({
       if (!report) return send(res, 404, { error: 'unknown_report' });
       store.putReport(id, { ...report, status: resolution, resolutionNote: note, resolvedAt: Date.now() });
       const s = reportStats(report.reported);
+      recordAudit(req, 'report.resolve', { id, resolution, reported: report.reported, note });
       return send(res, 200, { ok: true, id, status: resolution, reported: report.reported, standing: s });
     }
 

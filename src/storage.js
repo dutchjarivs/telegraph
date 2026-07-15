@@ -53,6 +53,35 @@ export class Storage {
     this.blocks = fs.existsSync(this.blocksFile)
       ? JSON.parse(fs.readFileSync(this.blocksFile, 'utf8'))
       : {};
+    // Append-only audit trail of operator (admin-token) mutations: grants,
+    // suspensions, removals, report resolutions. Separate from everything else
+    // because it answers a different question — "who changed what, when, from
+    // where" — and must survive even when the thing it describes is later
+    // deleted. Never records secrets (no token, no balances beyond the delta).
+    this.auditFile = path.join(dataDir, 'audit.json');
+    this.audit = fs.existsSync(this.auditFile)
+      ? JSON.parse(fs.readFileSync(this.auditFile, 'utf8'))
+      : [];
+  }
+
+  // Append an operator action. Capped as a ring buffer so the file can't grow
+  // without bound; the cap is high enough that admin actions never realistically
+  // roll off, and `truncated` on read tells a viewer if any ever did.
+  appendAudit(entry, cap = 10_000) {
+    this.audit.push(entry);
+    if (this.audit.length > cap) this.audit = this.audit.slice(-cap);
+    atomicWrite(this.auditFile, JSON.stringify(this.audit, null, 2));
+  }
+
+  // Most recent operator actions, newest first (bounded slice for the dashboard).
+  listAudit(limit = 100) {
+    const n = this.audit.length;
+    const slice = limit && limit < n ? this.audit.slice(n - limit) : this.audit.slice();
+    return slice.reverse();
+  }
+
+  auditCount() {
+    return this.audit.length;
   }
 
   // hasOwn throughout: a bare lookup on "__proto__" or "constructor" would
