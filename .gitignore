@@ -22,3 +22,7 @@ sdk/python/build/
 sdk/python/*.egg-info/
 __pycache__/
 .pytest_cache/
+
+# JS SDK / CLI pack + local publish-verify artifacts
+*.tgz
+.openclaw-verify/

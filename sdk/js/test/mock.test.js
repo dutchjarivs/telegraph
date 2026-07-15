@@ -1,0 +1,128 @@
+// The mock relay is the SDK's own first customer: if an agent can be built and
+// exercised end-to-end against MockRelay with no network, so can a developer's.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { TelegraphClient, createIdentity, TelegraphError } from '../index.js';
+import { MockRelay } from '../mock.js';
+
+function pair(relay) {
+  const alice = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  const bob = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  return { alice, bob };
+}
+
+test('a wire sent through the mock arrives decrypted and sender-verified', async () => {
+  const relay = new MockRelay();
+  const { alice, bob } = pair(relay);
+  await alice.register({ handle: 'alice', bio: 'sender' });
+  await bob.register({ handle: 'bob', bio: 'receiver' });
+
+  const sent = await alice.send('@bob', 'meet at the ridge, sundown');
+  assert.equal(sent.duplicate, false);
+  assert.ok(sent.id);
+
+  const wires = await bob.inbox({ ack: true });
+  assert.equal(wires.length, 1);
+  assert.equal(wires[0].text, 'meet at the ridge, sundown');
+  assert.equal(wires[0].verified, true);
+  assert.equal(wires[0].fromHandle, 'alice');
+
+  // acked → gone
+  assert.equal((await bob.inbox()).length, 0);
+});
+
+test('the relay cannot read the wire: ciphertext never equals the plaintext', async () => {
+  const relay = new MockRelay();
+  const { alice, bob } = pair(relay);
+  await alice.register({ handle: 'a' });
+  await bob.register({ handle: 'b' });
+  await alice.send(bob.identity.address, 'secret payload');
+  const stored = relay.mailboxes.get(bob.identity.address)[0];
+  assert.ok(!stored.ciphertext.includes('secret'));
+  assert.notEqual(stored.ciphertext, 'secret payload');
+});
+
+test('sender keeps a decryptable self-sealed copy in sent()', async () => {
+  const relay = new MockRelay();
+  const { alice, bob } = pair(relay);
+  await alice.register({ handle: 'a' });
+  await bob.register({ handle: 'b' });
+  await alice.send('@b', 'for my own records');
+  const log = await alice.sent();
+  assert.equal(log.length, 1);
+  assert.equal(log[0].text, 'for my own records');
+});
+
+test('a blocked sender is refused explicitly, not blackholed', async () => {
+  const relay = new MockRelay();
+  const { alice, bob } = pair(relay);
+  await alice.register({ handle: 'a' });
+  await bob.register({ handle: 'b' });
+  await bob.block('@a');
+  await assert.rejects(
+    alice.send('@b', 'let me in'),
+    (e) => e instanceof TelegraphError && e.code === 'recipient_blocked_sender',
+  );
+  assert.equal((await bob.inbox()).length, 0);
+});
+
+test('a replayed envelope is reported as duplicate, not delivered twice', async () => {
+  const relay = new MockRelay();
+  const { alice, bob } = pair(relay);
+  await alice.register({ handle: 'a' });
+  await bob.register({ handle: 'b' });
+  // A network retry replays the *same* signed body. Fresh send() calls each
+  // pick a new nonce, so drop to the wire to reproduce a true replay.
+  const { encrypt, signFields, messageFields } = await import('../src/crypto.js');
+  const rec = await alice.lookup('@b');
+  const { nonce, ciphertext } = encrypt('hi', rec.boxPublicKey, alice.identity.boxSecretKey);
+  const ts = Date.now();
+  const sig = signFields(messageFields(rec.address, alice.identity.address, nonce, ciphertext, ts), alice.identity.signSecretKey);
+  const body = JSON.stringify({ to: rec.address, from: alice.identity.address, nonce, ciphertext, ts, sig });
+  const post = () => relay.fetch('http://mock/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json' }, body }).then((r) => r.json());
+  const first = await post();
+  const second = await post();
+  assert.equal(first.duplicate ?? false, false);
+  assert.equal(second.duplicate, true);
+  assert.equal((await bob.inbox()).length, 1);
+});
+
+test('registering a handle already taken by another key is rejected', async () => {
+  const relay = new MockRelay();
+  const { alice, bob } = pair(relay);
+  await alice.register({ handle: 'samename' });
+  await assert.rejects(
+    bob.register({ handle: 'SameName' }),
+    (e) => e instanceof TelegraphError && e.code === 'handle_taken',
+  );
+});
+
+test('signed calls without an identity fail fast with client_no_identity', async () => {
+  const relay = new MockRelay();
+  const anon = new TelegraphClient({ fetch: relay.fetch });
+  await assert.rejects(anon.inbox(), (e) => e instanceof TelegraphError && e.code === 'client_no_identity');
+  await assert.rejects(anon.send('@x', 'hi'), (e) => e.code === 'client_no_identity');
+});
+
+test('an over-long wire is rejected client-side before any request', async () => {
+  const relay = new MockRelay();
+  const { alice, bob } = pair(relay);
+  await alice.register({ handle: 'a' });
+  await bob.register({ handle: 'b' });
+  await assert.rejects(
+    alice.send('@b', 'x'.repeat(4001)),
+    (e) => e instanceof TelegraphError && e.code === 'client_message_too_long',
+  );
+});
+
+test('directory search finds an agent by handle and bio', async () => {
+  const relay = new MockRelay();
+  const { alice, bob } = pair(relay);
+  await alice.register({ handle: 'weatherbot', bio: 'forecasts and radar' });
+  await bob.register({ handle: 'newsbot', bio: 'headlines' });
+  const byHandle = await alice.directory('weather');
+  assert.equal(byHandle.count, 1);
+  const byBio = await alice.directory('radar');
+  assert.equal(byBio.count, 1);
+  assert.equal(byBio.agents[0].verified, true);
+});

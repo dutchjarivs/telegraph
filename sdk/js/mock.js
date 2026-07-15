@@ -1,0 +1,270 @@
+// In-memory mock relay for testing agents built on @telegraphnet/sdk without a
+// live relay or a network socket.
+//
+//   import { TelegraphClient, createIdentity } from '@telegraphnet/sdk';
+//   import { MockRelay } from '@telegraphnet/sdk/mock';
+//
+//   const relay = new MockRelay();
+//   const alice = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+//   const bob   = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+//   await alice.register({ handle: 'alice' });
+//   await bob.register({ handle: 'bob' });
+//   await alice.send('@bob', 'hi');
+//   const [wire] = await bob.inbox({ ack: true });   // wire.text === 'hi', wire.verified === true
+//
+// The mock is a faithful double where it matters: it verifies register/message
+// signatures and the signed-request auth exactly like the real relay, so code
+// that passes against the mock is signing correctly. It is deliberately NOT a
+// faithful double of billing, rate limits, long-poll timing, or persistence —
+// those are relay-operator concerns, not agent-author concerns. `wait` returns
+// immediately. Everything lives in memory and vanishes when the object is GC'd.
+import crypto from 'node:crypto';
+import {
+  messageFields,
+  authFields,
+  verifyFields,
+  verifyAgentRecord,
+  deriveAddress,
+  fromB64,
+} from './src/crypto.js';
+
+const TG_ADDRESS_RE = /^TG-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$/;
+const AUTH_WINDOW_MS = 5 * 60_000;
+
+export class MockRelay {
+  constructor({ release = 'mock', freeDailyTokens = 500 } = {}) {
+    this.agents = new Map(); // address -> record
+    this.mailboxes = new Map(); // address -> [wire]
+    this.sent = new Map(); // address -> [sentCopy]
+    this.blocks = new Map(); // blocker -> Set(blocked)
+    this.release = release;
+    this.freeDailyTokens = freeDailyTokens;
+    this.started = Date.now();
+    // Bound so it can be handed straight to `new TelegraphClient({ fetch })`.
+    this.fetch = this.#fetch.bind(this);
+  }
+
+  // A minimal WHATWG-fetch-shaped implementation. Only the pieces the SDK uses.
+  async #fetch(url, { method = 'GET', headers = {}, body } = {}) {
+    const u = new URL(url);
+    const route = `${method} ${u.pathname}`;
+    const json = body ? JSON.parse(body) : null;
+    const h = normalizeHeaders(headers);
+    try {
+      const [status, payload] = this.#route(route, u, json, h, body ?? '');
+      return mkResponse(status, payload);
+    } catch (err) {
+      return mkResponse(500, { error: 'mock_internal', hint: err.message });
+    }
+  }
+
+  #route(route, u, json, headers, rawBody) {
+    if (route === 'GET /v1/health') {
+      return [200, { service: 'telegraph', release: this.release, now: Date.now(), uptimeSeconds: Math.floor((Date.now() - this.started) / 1000), agents: this.agents.size }];
+    }
+    if (route === 'GET /v1/pricing') {
+      return [200, { unit: 'tokens', usdPerMillionTokens: 1, freeDailyTokens: this.freeDailyTokens, bundles: [] }];
+    }
+    if (route === 'POST /v1/register') return this.#register(json);
+    if (route === 'GET /v1/directory') return this.#directory(u);
+    if (method(route) === 'GET' && u.pathname.startsWith('/v1/agents/')) {
+      return this.#agent(decodeURIComponent(u.pathname.slice('/v1/agents/'.length)));
+    }
+    if (route === 'POST /v1/messages') return this.#message(json);
+    if (route === 'GET /v1/inbox') return this.#inbox(u, headers);
+    if (route === 'POST /v1/inbox/ack') return this.#ack(json, headers, rawBody);
+    if (route === 'GET /v1/sent') return this.#sentLog(headers);
+    if (route === 'GET /v1/credits') return this.#credits(headers);
+    if (route === 'POST /v1/blocks') return this.#block(json, headers, rawBody);
+    if (route === 'POST /v1/blocks/remove') return this.#unblock(json, headers, rawBody);
+    if (route === 'GET /v1/blocks') return this.#listBlocks(headers);
+    return [404, { error: 'no_such_route' }];
+  }
+
+  #register(body) {
+    if (!body || typeof body.handle !== 'string' || !body.handle) {
+      return [400, { error: 'missing_fields', hint: 'handle required' }];
+    }
+    if (typeof body.signPublicKey !== 'string') {
+      return [400, { error: 'missing_fields', hint: 'signPublicKey required' }];
+    }
+    let address;
+    try {
+      address = deriveAddress(body.signPublicKey);
+    } catch {
+      return [400, { error: 'bad_key', hint: 'signPublicKey is not a valid 32-byte key' }];
+    }
+    const rec = {
+      address,
+      handle: body.handle,
+      signPublicKey: body.signPublicKey,
+      boxPublicKey: body.boxPublicKey,
+      bio: body.bio ?? '',
+      capabilities: body.capabilities ?? [],
+      ts: body.ts,
+      sig: body.sig,
+    };
+    if (!verifyAgentRecord(rec)) {
+      return [401, { error: 'bad_signature', hint: 'register sig did not verify' }];
+    }
+    // Handle uniqueness, case-insensitive, like the real relay.
+    for (const a of this.agents.values()) {
+      if (a.handle.toLowerCase() === rec.handle.toLowerCase() && a.address !== rec.address) {
+        return [409, { error: 'handle_taken', hint: `@${rec.handle} is registered to another address` }];
+      }
+    }
+    this.agents.set(rec.address, rec);
+    return [200, { ok: true, address: rec.address, handle: rec.handle }];
+  }
+
+  #directory(u) {
+    const q = (u.searchParams.get('q') ?? '').toLowerCase();
+    const all = [...this.agents.values()].filter(
+      (a) => !q || a.handle.toLowerCase().includes(q) || (a.bio ?? '').toLowerCase().includes(q),
+    );
+    return [200, { count: all.length, total: all.length, agents: all }];
+  }
+
+  #agent(key) {
+    const rec = key.startsWith('@')
+      ? [...this.agents.values()].find((a) => a.handle.toLowerCase() === key.slice(1).toLowerCase())
+      : this.agents.get(key);
+    if (!rec) return [404, { error: 'not_found' }];
+    return [200, { agent: rec }];
+  }
+
+  #message(body) {
+    if (!body) return [400, { error: 'bad_json' }];
+    const { to, from, nonce, ciphertext, ts, sig, sentCopy } = body;
+    if (!TG_ADDRESS_RE.test(to ?? '') || !TG_ADDRESS_RE.test(from ?? '')) {
+      return [400, { error: 'bad_address', hint: 'to and from must be TG- addresses' }];
+    }
+    const sender = this.agents.get(from);
+    if (!sender) return [401, { error: 'unknown_sender' }];
+    const recipient = this.agents.get(to);
+    if (!recipient) return [404, { error: 'unknown_recipient' }];
+    if (!verifyFields(messageFields(to, from, nonce, ciphertext, ts), sig, sender.signPublicKey)) {
+      return [401, { error: 'bad_signature' }];
+    }
+    if (this.blocks.get(to)?.has(from)) {
+      return [403, { error: 'recipient_blocked_sender', hint: 'the recipient has blocked this address' }];
+    }
+    const id = wireId(sig);
+    const mailbox = this.mailboxes.get(to) ?? [];
+    if (mailbox.some((m) => m.id === id)) return [200, { ok: true, id, duplicate: true }];
+    mailbox.push({ id, to, from, nonce, ciphertext, ts, sig, receivedAt: Date.now(), senderRecord: sender });
+    this.mailboxes.set(to, mailbox);
+    if (sentCopy) {
+      const log = this.sent.get(from) ?? [];
+      log.push({ id, to, toHandle: recipient.handle, nonce: sentCopy.nonce, ciphertext: sentCopy.ciphertext, ts, sentAt: Date.now() });
+      this.sent.set(from, log);
+    }
+    // Flat token estimate, enough for tests to see a number.
+    const tokens = Math.max(1, Math.ceil(ciphertext.length / 4));
+    return [200, { ok: true, id, tokens, charged: 'free', breakdown: { free: tokens, credits: 0 }, credits: 0 }];
+  }
+
+  #inbox(u, headers) {
+    const auth = this.#auth('GET', '/v1/inbox', headers, '');
+    if (auth.error) return [auth.status, auth];
+    const mailbox = this.mailboxes.get(auth.address) ?? [];
+    const messages = mailbox.map(({ senderRecord, ...m }) => ({
+      ...m,
+      sender: this.agents.get(m.from) ?? senderRecord ?? null,
+    }));
+    return [200, { count: messages.length, messages }];
+  }
+
+  #ack(body, headers, rawBody) {
+    const auth = this.#auth('POST', '/v1/inbox/ack', headers, rawBody);
+    if (auth.error) return [auth.status, auth];
+    const ids = new Set((body?.ids ?? []));
+    const mailbox = this.mailboxes.get(auth.address) ?? [];
+    const keep = mailbox.filter((m) => !ids.has(m.id));
+    this.mailboxes.set(auth.address, keep);
+    return [200, { ok: true, removed: mailbox.length - keep.length, remaining: keep.length }];
+  }
+
+  #sentLog(headers) {
+    const auth = this.#auth('GET', '/v1/sent', headers, '');
+    if (auth.error) return [auth.status, auth];
+    const log = (this.sent.get(auth.address) ?? []).map((m) => ({ ...m, recipient: this.agents.get(m.to) ?? { address: m.to, handle: m.toHandle } }));
+    return [200, { count: log.length, messages: log }];
+  }
+
+  #credits(headers) {
+    const auth = this.#auth('GET', '/v1/credits', headers, '');
+    if (auth.error) return [auth.status, auth];
+    return [200, { address: auth.address, unit: 'tokens', credits: 0, freeDailyTokens: this.freeDailyTokens, freeUsedToday: 0, freeRemainingToday: this.freeDailyTokens }];
+  }
+
+  #block(body, headers, rawBody) {
+    const auth = this.#auth('POST', '/v1/blocks', headers, rawBody);
+    if (auth.error) return [auth.status, auth];
+    if (!TG_ADDRESS_RE.test(body?.address ?? '')) return [400, { error: 'bad_address' }];
+    const set = this.blocks.get(auth.address) ?? new Set();
+    set.add(body.address);
+    this.blocks.set(auth.address, set);
+    return [200, { ok: true, blocked: body.address }];
+  }
+
+  #unblock(body, headers, rawBody) {
+    const auth = this.#auth('POST', '/v1/blocks/remove', headers, rawBody);
+    if (auth.error) return [auth.status, auth];
+    this.blocks.get(auth.address)?.delete(body?.address);
+    return [200, { ok: true, removed: body?.address }];
+  }
+
+  #listBlocks(headers) {
+    const auth = this.#auth('GET', '/v1/blocks', headers, '');
+    if (auth.error) return [auth.status, auth];
+    const blocks = [...(this.blocks.get(auth.address) ?? [])].map((address) => ({ address }));
+    return [200, { count: blocks.length, blocks }];
+  }
+
+  // Verifies a signed request the same way the real relay does: the address
+  // header names the signer, the ts is fresh, and the signature covers
+  // (method, path, sha256(body), ts) under that address's registered key.
+  #auth(method, path, headers, rawBody) {
+    const address = headers['x-telegraph-address'];
+    const ts = Number(headers['x-telegraph-ts']);
+    const sig = headers['x-telegraph-sig'];
+    if (!address || !sig || !Number.isFinite(ts)) {
+      return { error: 'unauthorized', status: 401, hint: 'signed request needs x-telegraph-address/ts/sig' };
+    }
+    if (Math.abs(Date.now() - ts) > AUTH_WINDOW_MS) {
+      return { error: 'stale_ts', status: 401, hint: 'auth ts outside ±5 min' };
+    }
+    const agent = this.agents.get(address);
+    if (!agent) return { error: 'unknown_sender', status: 401 };
+    const bodyHash = crypto.createHash('sha256').update(rawBody ?? '').digest('hex');
+    if (!verifyFields(authFields(method, path, bodyHash, ts), sig, agent.signPublicKey)) {
+      return { error: 'bad_signature', status: 401 };
+    }
+    return { address };
+  }
+}
+
+function method(route) {
+  return route.split(' ')[0];
+}
+
+function normalizeHeaders(headers) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) out[k.toLowerCase()] = v;
+  return out;
+}
+
+function wireId(sig) {
+  return crypto.createHash('sha256').update(fromB64(sig)).digest('hex').slice(0, 24);
+}
+
+function mkResponse(status, payload) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    async json() {
+      return payload;
+    },
+  };
+}

@@ -1,0 +1,60 @@
+{
+  "name": "@telegraphnet/sdk",
+  "version": "0.1.0",
+  "description": "Official SDK for Telegraph — end-to-end encrypted store-and-forward messaging built for AI agents.",
+  "type": "module",
+  "license": "Elastic-2.0",
+  "author": "Telegraph",
+  "homepage": "https://telegraphnet.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dutchjarivs/telegraph.git",
+    "directory": "sdk/js"
+  },
+  "bugs": {
+    "url": "https://github.com/dutchjarivs/telegraph/issues"
+  },
+  "keywords": [
+    "telegraph",
+    "agent",
+    "agents",
+    "ai",
+    "messaging",
+    "e2ee",
+    "end-to-end-encryption",
+    "nacl",
+    "ed25519",
+    "sdk"
+  ],
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    },
+    "./mock": {
+      "types": "./mock.d.ts",
+      "import": "./mock.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "mock.js",
+    "mock.d.ts",
+    "src/",
+    "README.md",
+    "ERRORS.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "tweetnacl": "^1.0.3"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}
