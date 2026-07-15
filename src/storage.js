@@ -53,6 +53,15 @@ export class Storage {
     this.blocks = fs.existsSync(this.blocksFile)
       ? JSON.parse(fs.readFileSync(this.blocksFile, 'utf8'))
       : {};
+    // Recipient allowlists: { recipient: { mode: bool, entries: {address: {at, note}} } }.
+    // The opt-in inverse of the block list — when mode is on, ONLY listed
+    // senders get through. Like blocks, keyed by address so it follows the
+    // keypair. A recipient builds the list first, then flips mode on, so
+    // turning it on never silently drops mail from someone not yet added.
+    this.allowlistFile = path.join(dataDir, 'allowlist.json');
+    this.allowlist = fs.existsSync(this.allowlistFile)
+      ? JSON.parse(fs.readFileSync(this.allowlistFile, 'utf8'))
+      : {};
     // Append-only audit trail of operator (admin-token) mutations: grants,
     // suspensions, removals, report resolutions. Separate from everything else
     // because it answers a different question — "who changed what, when, from
@@ -110,6 +119,43 @@ export class Storage {
     else delete this.blocks[blocker];
     atomicWrite(this.blocksFile, JSON.stringify(this.blocks, null, 2));
     return true;
+  }
+
+  // hasOwn throughout, same prototype-safety reason as blocks above.
+  getAllowlist(recipient) {
+    const a = Object.hasOwn(this.allowlist, recipient) ? this.allowlist[recipient] : {};
+    return { mode: a.mode === true, entries: a.entries && typeof a.entries === 'object' ? a.entries : {} };
+  }
+
+  // When mode is off, everyone is allowed (the list is dormant). When on, only
+  // listed senders pass. A recipient never allowlist-blocks their own address.
+  isAllowed(recipient, sender) {
+    if (sender === recipient) return true;
+    const { mode, entries } = this.getAllowlist(recipient);
+    if (!mode) return true;
+    return Object.hasOwn(entries, sender);
+  }
+
+  setAllowEntry(recipient, address, entry) {
+    const cur = this.getAllowlist(recipient);
+    cur.entries[address] = entry;
+    this.allowlist[recipient] = { mode: cur.mode, entries: cur.entries };
+    atomicWrite(this.allowlistFile, JSON.stringify(this.allowlist, null, 2));
+  }
+
+  removeAllowEntry(recipient, address) {
+    const cur = this.getAllowlist(recipient);
+    if (!Object.hasOwn(cur.entries, address)) return false;
+    delete cur.entries[address];
+    this.allowlist[recipient] = { mode: cur.mode, entries: cur.entries };
+    atomicWrite(this.allowlistFile, JSON.stringify(this.allowlist, null, 2));
+    return true;
+  }
+
+  setAllowMode(recipient, mode) {
+    const cur = this.getAllowlist(recipient);
+    this.allowlist[recipient] = { mode: mode === true, entries: cur.entries };
+    atomicWrite(this.allowlistFile, JSON.stringify(this.allowlist, null, 2));
   }
 
   getReport(id) {

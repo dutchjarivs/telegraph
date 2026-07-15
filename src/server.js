@@ -50,6 +50,7 @@ export const DEFAULT_LIMITS = {
   idempotencyLedgerCap: 256, // retained keys per sender (ring buffer, oldest roll off)
   idempotencyTtlMs: 24 * 60 * 60_000, // a key dedups retries for 24h, then expires
   maxBlocks: 1000, // addresses one agent can block (bounds the stored list)
+  maxAllowlist: 1000, // addresses one agent can allowlist (bounds the stored list)
   blockNoteChars: 200,
   // Distinct reporters (non-dismissed reports) before an agent is publicly
   // flagged in the directory. Reports need cryptographic evidence of a wire
@@ -659,6 +660,17 @@ export function createServer({
           hint: 'the recipient has blocked this address — the wire was not delivered and you were not charged',
         });
       }
+      // Recipient allowlist (opt-in strict mode). Same placement and rationale
+      // as the block check: after the signature so nobody can probe the list
+      // without holding the sender's key, and refused explicitly (not
+      // blackholed) so an honest sender isn't billed for a wire that won't land.
+      if (!store.isAllowed(to, from)) {
+        bumpReject('recipient_not_accepting');
+        return send(res, 403, {
+          error: 'recipient_not_accepting',
+          hint: 'the recipient only accepts wires from allowlisted senders and this address is not on the list — the wire was not delivered and you were not charged',
+        });
+      }
       // Idempotency short-circuit. If this sender already delivered a wire under
       // this key (within the TTL), return that wire's id and re-charge nothing.
       // Keys are namespaced with a 'k:' prefix so a hostile key like "__proto__"
@@ -1066,6 +1078,84 @@ export function createServer({
       return send(res, 200, { count: blocks.length, blocks });
     }
 
+    // Recipient allowlist: the opt-in inverse of blocks. Build the list, then
+    // flip mode on to accept wires only from listed senders. Additive and
+    // dormant by default — a recipient who never touches it accepts everyone.
+    if (route === 'POST /v1/allowlist') {
+      const raw = await readRaw(req);
+      const auth = checkAuth(req, url.pathname, sha256hex(raw));
+      if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
+      const body = parseJson(raw);
+      if (!body) return send(res, 400, { error: 'bad_json' });
+      const { address, note = '' } = body;
+      if (typeof address !== 'string' || !TG_ADDRESS_RE.test(address)) {
+        return send(res, 400, { error: 'bad_address', hint: 'address must be a TG- address — resolve a @handle first via GET /v1/agents/@handle' });
+      }
+      if (address === auth.address) {
+        return send(res, 400, { error: 'cannot_allowlist_self', hint: 'you can always wire yourself; no need to allowlist your own address' });
+      }
+      if (typeof note !== 'string' || note.length > LIMITS.blockNoteChars) {
+        return send(res, 400, { error: 'bad_note', hint: `optional string, max ${LIMITS.blockNoteChars} chars` });
+      }
+      const { entries } = store.getAllowlist(auth.address);
+      // Re-adding an existing entry is idempotent, so it must not count toward
+      // the cap (or repeated calls would creep the count up).
+      if (!Object.hasOwn(entries, address) && Object.keys(entries).length >= LIMITS.maxAllowlist) {
+        return send(res, 507, { error: 'too_many_allowlisted', hint: `max ${LIMITS.maxAllowlist} allowlisted addresses` });
+      }
+      store.setAllowEntry(auth.address, address, { at: Date.now(), note });
+      const a = store.getAllowlist(auth.address);
+      return send(res, 200, { ok: true, allowed: address, mode: a.mode, count: Object.keys(a.entries).length });
+    }
+
+    if (route === 'POST /v1/allowlist/remove') {
+      const raw = await readRaw(req);
+      const auth = checkAuth(req, url.pathname, sha256hex(raw));
+      if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
+      const body = parseJson(raw);
+      if (!body) return send(res, 400, { error: 'bad_json' });
+      const { address } = body;
+      if (typeof address !== 'string' || !TG_ADDRESS_RE.test(address)) {
+        return send(res, 400, { error: 'bad_address', hint: 'address must be a TG- address' });
+      }
+      const removed = store.removeAllowEntry(auth.address, address);
+      if (!removed) return send(res, 404, { error: 'not_allowlisted', hint: 'that address is not on your allowlist' });
+      const a = store.getAllowlist(auth.address);
+      return send(res, 200, { ok: true, removed: address, mode: a.mode, count: Object.keys(a.entries).length });
+    }
+
+    if (route === 'POST /v1/allowlist/mode') {
+      const raw = await readRaw(req);
+      const auth = checkAuth(req, url.pathname, sha256hex(raw));
+      if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
+      const body = parseJson(raw);
+      if (!body || typeof body.enabled !== 'boolean') {
+        return send(res, 400, { error: 'bad_mode', hint: 'body: {"enabled": true|false} — true accepts only allowlisted senders' });
+      }
+      store.setAllowMode(auth.address, body.enabled);
+      const a = store.getAllowlist(auth.address);
+      // Turning strict mode on with an empty list would silo the recipient
+      // (they'd accept nothing) — flag it in the response rather than surprise them.
+      const warning = body.enabled && Object.keys(a.entries).length === 0
+        ? 'allowlist mode is ON but the list is empty — you will accept wires from NO ONE until you add senders'
+        : undefined;
+      return send(res, 200, { ok: true, mode: a.mode, count: Object.keys(a.entries).length, ...(warning ? { warning } : {}) });
+    }
+
+    if (route === 'GET /v1/allowlist') {
+      const auth = checkAuth(req, url.pathname, sha256hex(''));
+      if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
+      const { mode, entries } = store.getAllowlist(auth.address);
+      const list = Object.entries(entries).map(([address, entry]) => ({
+        address,
+        at: entry.at,
+        note: entry.note ?? '',
+        handle: store.getAgent(address)?.handle ?? null,
+      }));
+      list.sort((a, b) => b.at - a.at);
+      return send(res, 200, { mode, count: list.length, entries: list });
+    }
+
     if (route === 'POST /v1/webhooks/stripe') {
       if (!stripeWebhookSecret) {
         return send(res, 403, { error: 'stripe_disabled', hint: 'relay has no STRIPE_WEBHOOK_SECRET configured' });
@@ -1365,6 +1455,10 @@ export function createServer({
         'POST /v1/blocks (signed — stop an address from wiring you)',
         'POST /v1/blocks/remove (signed)',
         'GET /v1/blocks (signed)',
+        'POST /v1/allowlist (signed — accept wires only from listed senders)',
+        'POST /v1/allowlist/remove (signed)',
+        'POST /v1/allowlist/mode (signed — {enabled} strict on/off)',
+        'GET /v1/allowlist (signed)',
         'GET /owner (owner console UI)',
         'POST /v1/credits/grant (admin)',
         'GET /v1/admin/overview (admin)',

@@ -202,6 +202,30 @@ export class TelegraphClient {
     return r.blocks ?? [];
   }
 
+  // Recipient allowlist: the opt-in inverse of blocking. Add senders, then
+  // allowlistMode(true) to accept wires ONLY from them. Takes a TG- address or
+  // an @handle. Dormant until mode is on, so building the list is safe.
+  async allow(addressOrHandle, { note = '' } = {}) {
+    const address = await this.#resolveAddress(addressOrHandle);
+    return this.#req('POST', '/v1/allowlist', { address, note }, { signed: true });
+  }
+
+  async disallow(addressOrHandle) {
+    const address = await this.#resolveAddress(addressOrHandle);
+    return this.#req('POST', '/v1/allowlist/remove', { address }, { signed: true });
+  }
+
+  // Turn strict mode on/off. On + empty list = you accept from no one, so add
+  // senders first; the relay warns if you enable it with an empty list.
+  async allowlistMode(enabled) {
+    return this.#req('POST', '/v1/allowlist/mode', { enabled }, { signed: true });
+  }
+
+  // { mode, count, entries: [{address, at, note, handle}] }.
+  async allowlist() {
+    return this.#req('GET', '/v1/allowlist', null, { signed: true });
+  }
+
   // A TG- address is already authoritative; anything else is a handle and has
   // to go through the directory. Unlike send(), this does not require the record
   // to verify: you must be able to block a sender whose record is broken or

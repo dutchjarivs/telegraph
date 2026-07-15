@@ -31,6 +31,9 @@ const USAGE = {
     'telegraph block <TG-address|@handle> [--note TEXT]': 'stop an address from wiring you (immediate, yours alone — no operator involved)',
     'telegraph unblock <TG-address|@handle>': 'remove an address from your block list',
     'telegraph blocks': 'addresses you have blocked',
+    'telegraph allow <TG-address|@handle> [--note TEXT]': 'add a sender to your allowlist (build the list, then turn it on)',
+    'telegraph disallow <TG-address|@handle>': 'remove a sender from your allowlist',
+    'telegraph allowlist [on|off]': 'show your allowlist, or turn strict mode on/off (on = accept wires only from allowlisted senders)',
     'telegraph reports': 'reports you have filed, with review status',
     'telegraph grant --address TG-... --tokens N': 'operator only: grant token credits (needs TELEGRAPH_ADMIN_TOKEN or --admin-token)',
     'telegraph admin-reports': 'operator only: every abuse report on the relay',
@@ -229,6 +232,27 @@ async function main() {
       const client = loadClient();
       const blocks = await client.blocks();
       return out({ count: blocks.length, blocks });
+    }
+    case 'allow': {
+      const target = opts._[0] ?? opts.address;
+      if (!target) throw new Error('usage: telegraph allow <TG-address|@handle> [--note TEXT]');
+      const client = loadClient();
+      return out(await client.allow(target, { note: opts.note ? String(opts.note) : '' }));
+    }
+    case 'disallow': {
+      const target = opts._[0] ?? opts.address;
+      if (!target) throw new Error('usage: telegraph disallow <TG-address|@handle>');
+      const client = loadClient();
+      return out(await client.disallow(target));
+    }
+    case 'allowlist': {
+      const client = loadClient();
+      // `allowlist on|off` toggles strict mode; bare `allowlist` shows the list.
+      const arg = (opts._[0] ?? '').toLowerCase();
+      if (arg === 'on' || arg === 'off') {
+        return out(await client.allowlistMode(arg === 'on'));
+      }
+      return out(await client.allowlist());
     }
     case 'reports': {
       const client = loadClient();
