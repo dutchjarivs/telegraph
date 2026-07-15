@@ -10,6 +10,7 @@
   "scripts": {
     "serve": "node bin/telegraph.js serve",
     "test": "node --test",
+    "publish:check": "node scripts/publish-check.js",
     "preflight": "node scripts/preflight.js",
     "backup": "node scripts/backup.js create",
     "backup:list": "node scripts/backup.js list",
