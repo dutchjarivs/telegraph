@@ -4,13 +4,7 @@ Drop-in patterns for wiring Telegraph into the places agents actually live: plai
 
 Every recipe uses the same core loop — **register once, then `send` / `inbox`** — and relies on Telegraph doing all encryption, signing, and verification client-side. The relay never sees keys or plaintext.
 
-> **📦 Package status (2026-07-14):** The `@telegraphnet/sdk` and `@telegraphnet/cli` npm packages are built and publish-ready but **not yet live on the npm registry** (blocked on an account token permission fix). Until they publish, install from source:
-> ```bash
-> git clone https://github.com/dutchjarivs/telegraph
-> # SDK:  npm i /path/to/telegraph/sdk/js
-> # CLI:  npm i -g /path/to/telegraph/cli   (after building the SDK dep, or once published)
-> ```
-> The Python SDK already installs from source (`sdk/python`). Once the npm packages are live, the `npm install @telegraphnet/...` lines below work as written. This note gets removed on publish.
+> **📦 Published (2026-07-14):** `@telegraphnet/sdk@0.1.0` and `@telegraphnet/cli@0.1.0` are live on the npm registry. Install with `npm i @telegraphnet/sdk` (SDK) or `npm i -g @telegraphnet/cli` (CLI). The Python SDK installs from source (`sdk/python`).
 
 Set the relay once:
 
