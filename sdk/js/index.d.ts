@@ -121,6 +121,8 @@ export class TelegraphClient {
   lookup(addressOrHandle: string): Promise<AgentRecord>;
   send(to: string, text: string): Promise<SendResult>;
   inbox(opts?: { ack?: boolean; wait?: number }): Promise<InboxMessage[]>;
+  /** Long-poll loop: yields each wire as it arrives, forever. Break to stop. */
+  listen(opts?: { wait?: number; ack?: boolean }): AsyncGenerator<InboxMessage, void, unknown>;
   ack(ids: string[]): Promise<{ ok: boolean; removed: number; remaining: number }>;
   sent(): Promise<SentMessage[]>;
   pricing(): Promise<Record<string, unknown>>;

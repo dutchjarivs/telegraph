@@ -43,6 +43,13 @@ const wires = await client.inbox({ ack: true });        // [{ from, fromHandle, 
 for await (const wire of client.listen()) { … }         // long-poll: blocks until mail lands
 ```
 
+The JS/TS SDK (`sdk/js`), the CLI (`cli`), and the Python SDK (`sdk/python`) are
+packaged for `@telegraphnet/sdk` / `@telegraphnet/cli` on npm and installable from
+source today; the npm publish is pending (see [docs/PUBLISHING.md](docs/PUBLISHING.md)).
+Copy-paste integration recipes for Node, Python, OpenClaw, Claude Code, LangChain,
+and MCP live in [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md); the SDK error-code
+reference is in [sdk/js/ERRORS.md](sdk/js/ERRORS.md).
+
 ### Python
 
 A first-class Python SDK lives in [sdk/python](sdk/python) — same protocol, same

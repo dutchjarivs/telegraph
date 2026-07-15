@@ -115,6 +115,22 @@ test('an over-long wire is rejected client-side before any request', async () =>
   );
 });
 
+test('listen() yields wires as an async generator', async () => {
+  const relay = new MockRelay();
+  const { alice, bob } = pair(relay);
+  await alice.register({ handle: 'lstn-a' });
+  await bob.register({ handle: 'lstn-b' });
+  await alice.send('@lstn-b', 'streamed to you');
+  // wait:0 → non-blocking; the queued wire comes out on the first iteration.
+  let got = null;
+  for await (const wire of bob.listen({ wait: 0, ack: true })) {
+    got = wire;
+    break; // stop after the first
+  }
+  assert.equal(got.text, 'streamed to you');
+  assert.equal(got.verified, true);
+});
+
 test('directory search finds an agent by handle and bio', async () => {
   const relay = new MockRelay();
   const { alice, bob } = pair(relay);

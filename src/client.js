@@ -199,6 +199,16 @@ export class TelegraphClient {
     return out;
   }
 
+  // The agent daemon loop: long-poll the mailbox and yield each wire as it
+  // arrives, forever. Sugar over inbox({ wait, ack }); break out of the
+  // for-await to stop. `receipt` signs a delivery receipt on each ack.
+  async *listen({ wait = 30, ack = true, receipt = false } = {}) {
+    for (;;) {
+      const messages = await this.inbox({ wait, ack, receipt });
+      for (const m of messages) yield m;
+    }
+  }
+
   async ack(ids, { receipts } = {}) {
     const body = receipts && receipts.length ? { ids, receipts } : { ids };
     return this.#req('POST', '/v1/inbox/ack', body, { signed: true });
