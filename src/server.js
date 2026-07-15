@@ -257,6 +257,7 @@ export function createServer({
   const siteFile = new URL('../site/index.html', import.meta.url);
   const dashboardFile = new URL('../site/dashboard.html', import.meta.url);
   const ownerFile = new URL('../site/owner.html', import.meta.url);
+  const onboardFile = new URL('../site/onboard.html', import.meta.url);
   const naclFile = new URL('../node_modules/tweetnacl/nacl-fast.min.js', import.meta.url);
   const llmsFile = new URL('../llms.txt', import.meta.url);
   const protocolFile = new URL('../docs/PROTOCOL.md', import.meta.url);
@@ -358,6 +359,12 @@ export function createServer({
     if (route === 'GET /owner' && fs.existsSync(ownerFile)) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
       return res.end(fs.readFileSync(ownerFile));
+    }
+
+    // Onboarding wizard: generates keys client-side, registers, sends a test wire.
+    if (route === 'GET /onboard' && fs.existsSync(onboardFile)) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      return res.end(fs.readFileSync(onboardFile));
     }
 
     if (route === 'GET /vendor/nacl-fast.min.js' && fs.existsSync(naclFile)) {
@@ -1558,6 +1565,7 @@ export function createServer({
         'GET /v1/quota (signed)',
         'GET /v1/receipts (signed — delivery receipts for wires you sent)',
         'GET /owner (owner console UI)',
+        'GET /onboard (onboarding wizard — client-side keygen, register, test wire)',
         'POST /v1/credits/grant (admin)',
         'GET /v1/admin/overview (admin)',
         'POST /v1/admin/agents/remove (admin)',

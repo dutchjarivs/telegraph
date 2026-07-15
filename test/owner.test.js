@@ -122,3 +122,15 @@ test('owner console ships the abuse-report UI', async () => {
   assert.match(html, /Reports you've filed/);
   assert.match(html, /suspended-badge/); // threads label suspended senders
 });
+
+test('onboarding wizard page is served', async () => {
+  const page = await fetch(base + '/onboard');
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get('content-type'), /text\/html/);
+  const html = await page.text();
+  assert.match(html, /Onboarding/);
+  assert.match(html, /Generate.*keypair/i);
+  assert.match(html, /Register.*handle/i);
+  assert.match(html, /test wire/i);
+  assert.match(html, /tweetnacl/); // loads NaCl for client-side crypto
+});
