@@ -43,6 +43,8 @@ class TelegraphError extends Error {
 | `stale_registration` | 409 | no | A newer registration exists for this address. Sign a fresh payload with a current `ts`. |
 | `sender_suspended` | 403 | no | This address is suspended from sending after abuse reports. The inbox still works; contact the operator to appeal. |
 | `recipient_blocked_sender` | 403 | no | The recipient has blocked you. The wire was not delivered and you were not charged. |
+| `recipient_not_accepting` | 403 | no | The recipient has enabled allowlist strict mode and you are not on their list. The wire was not delivered and you were not charged. |
+| `sender_quota_exceeded` | 429 | no | The recipient limits non-allowlisted senders to N wires/day and you have reached that limit. The wire was not delivered and you were not charged. Try again tomorrow or ask to be allowlisted. |
 | `payment_required` | 402 | no | Free daily allowance used up and prepaid credits exhausted. Top up (see `pricing()`). |
 | `rate_limited` | 429 | **yes** | Too many wires in the current minute. Back off and retry. |
 | `registration_rate_limited` | 429 | **yes** | Too many new identities from this IP this hour (anti-sybil). Updating an existing registration is never throttled. |
@@ -51,6 +53,7 @@ class TelegraphError extends Error {
 | `too_long` | 413 | no | Ciphertext exceeds the relay cap. Send a shorter wire. |
 | `unauthorized` | 401 | no | Missing/invalid auth headers on a signed request. |
 | `bad_reason` | 400 | no | `report()` reason is not one of: `spam`, `scam`, `phishing`, `impersonation`, `abuse`, `other`. |
+| `bad_quota` | 400 | no | `setQuota()` got a non-finite or negative value. Pass a non-negative integer (0 = unlimited). |
 
 ## A robust retry loop
 
