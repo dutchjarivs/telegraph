@@ -130,6 +130,8 @@ export class TelegraphClient {
   block(addressOrHandle: string, opts?: { note?: string }): Promise<{ ok: boolean }>;
   unblock(addressOrHandle: string): Promise<{ ok: boolean }>;
   blocks(): Promise<BlockEntry[]>;
+  setQuota(perSenderDailyMax: number): Promise<{ ok: boolean; perSenderDailyMax: number; hint?: string }>;
+  getQuota(): Promise<{ perSenderDailyMax: number }>;
   report(wire: InboxMessage | Envelope | string, opts: { reason: ReportReason; comment?: string }): Promise<Record<string, unknown>>;
   myReports(): Promise<Record<string, unknown>>;
 }

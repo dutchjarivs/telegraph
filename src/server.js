@@ -722,6 +722,30 @@ export function createServer({
         bumpReject('mailbox_full');
         return send(res, 507, { error: 'mailbox_full', hint: 'recipient must fetch and ack before receiving more' });
       }
+      // Per-sender daily quota. The recipient caps how many wires/day any single
+      // non-allowlisted sender can deliver. Allowlisted senders are exempt
+      // (they're explicitly trusted). Self-wires are exempt (sending to yourself
+      // is always allowed). Checked after the duplicate/idempotency checks so a
+      // duplicate or idempotent replay never burns the sender's daily budget,
+      // and before billing so an over-quota wire is never charged. Like the
+      // block/allowlist checks, the rejection is explicit, not a silent blackhole.
+      const quota = store.getQuota(to);
+      // Exempt: self-wires, and senders explicitly on the recipient's allowlist
+      // (they're trusted — the whole point of the list). The allowlist entries
+      // are checked directly, regardless of strict mode: adding someone to the
+      // list is an explicit trust signal, and the quota is for everyone else.
+      const { entries: allowEntries } = store.getAllowlist(to);
+      const isExplicitlyAllowed = Object.hasOwn(allowEntries, from);
+      if (quota.perSenderDailyMax > 0 && from !== to && !isExplicitlyAllowed) {
+        const todayCount = store.todaySenderCount(from, to);
+        if (todayCount >= quota.perSenderDailyMax) {
+          bumpReject('sender_quota_exceeded');
+          return send(res, 429, {
+            error: 'sender_quota_exceeded',
+            hint: `the recipient limits non-allowlisted senders to ${quota.perSenderDailyMax} wires/day and you have already reached that — the wire was not delivered and you were not charged`,
+          });
+        }
+      }
       // Charge only after every check has passed; duplicates are never charged.
       const today = new Date().toISOString().slice(0, 10);
       const bill = store.getBilling(from);
@@ -756,6 +780,10 @@ export function createServer({
       mailbox.push({ id, to, from, nonce, ciphertext, ts, sig, receivedAt: Date.now(), senderRecord: sender });
       store.saveMailbox(to, mailbox);
       bumpDeliver(tokens);
+      // Per-sender quota counter: only counts committed deliveries, so a wire
+      // that failed any earlier check (blocked, not-allowlisted, over-quota,
+      // 402, duplicate, idempotent replay) never burns the sender's daily budget.
+      if (quota.perSenderDailyMax > 0) store.bumpSenderCount(from, to);
       seen[id] = Date.now();
       store.saveSeen(to, seen);
       // Record the idempotency key now that the wire is committed — never
@@ -1193,6 +1221,32 @@ export function createServer({
       return send(res, 200, { mode, count: list.length, entries: list });
     }
 
+    // Per-sender daily quota: a recipient caps how many wires/day any single
+    // non-allowlisted sender can deliver. Allowlisted senders are exempt.
+    // 0 = unlimited (the default, so nothing changes for agents who never set it).
+    if (route === 'POST /v1/quota') {
+      const raw = await readRaw(req);
+      const auth = checkAuth(req, url.pathname, sha256hex(raw));
+      if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
+      const body = parseJson(raw);
+      if (!body || typeof body.perSenderDailyMax !== 'number' || !Number.isFinite(body.perSenderDailyMax) || body.perSenderDailyMax < 0) {
+        return send(res, 400, { error: 'bad_quota', hint: 'body: {"perSenderDailyMax": N} — a non-negative integer (0 = unlimited)' });
+      }
+      const max = Math.floor(body.perSenderDailyMax);
+      if (max > 1_000_000) {
+        return send(res, 400, { error: 'bad_quota', hint: 'perSenderDailyMax must be at most 1,000,000' });
+      }
+      store.setQuota(auth.address, max);
+      return send(res, 200, { ok: true, perSenderDailyMax: max, hint: max === 0 ? 'quota disabled (unlimited)' : `non-allowlisted senders limited to ${max} wires/day to you` });
+    }
+
+    if (route === 'GET /v1/quota') {
+      const auth = checkAuth(req, url.pathname, sha256hex(''));
+      if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
+      const q = store.getQuota(auth.address);
+      return send(res, 200, { perSenderDailyMax: q.perSenderDailyMax });
+    }
+
     if (route === 'POST /v1/webhooks/stripe') {
       if (!stripeWebhookSecret) {
         return send(res, 403, { error: 'stripe_disabled', hint: 'relay has no STRIPE_WEBHOOK_SECRET configured' });
@@ -1375,6 +1429,10 @@ export function createServer({
         // written at the moment each action commits.
         audit: store.listAudit(100),
         auditTotal: store.auditCount(),
+        // How many agents have set a per-sender daily quota (non-zero).
+        quotas: {
+          agentsWithQuota: Object.values(store.quotas).filter((q) => q && q.perSenderDailyMax > 0).length,
+        },
       });
     }
 
@@ -1496,6 +1554,8 @@ export function createServer({
         'POST /v1/allowlist/remove (signed)',
         'POST /v1/allowlist/mode (signed — {enabled} strict on/off)',
         'GET /v1/allowlist (signed)',
+        'POST /v1/quota (signed — cap non-allowlisted senders to N wires/day)',
+        'GET /v1/quota (signed)',
         'GET /v1/receipts (signed — delivery receipts for wires you sent)',
         'GET /owner (owner console UI)',
         'POST /v1/credits/grant (admin)',

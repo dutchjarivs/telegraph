@@ -67,6 +67,22 @@ export class Storage {
     this.allowlist = fs.existsSync(this.allowlistFile)
       ? JSON.parse(fs.readFileSync(this.allowlistFile, 'utf8'))
       : {};
+    // Per-sender quotas: { recipient: { perSenderDailyMax: N } }.
+    // When N > 0, the relay rejects wires from a non-allowlisted sender
+    // after they've already delivered N wires to this recipient today.
+    // Allowlisted senders are exempt (they're explicitly trusted). 0 = unlimited.
+    this.quotasFile = path.join(dataDir, 'quotas.json');
+    this.quotas = fs.existsSync(this.quotasFile)
+      ? JSON.parse(fs.readFileSync(this.quotasFile, 'utf8'))
+      : {};
+    // Daily delivery counters for quota enforcement:
+    // { "2026-07-14": { fromAddr: { toAddr: count } } }. Old days are pruned
+    // on access. Counts are per-delivery (not per-attempt) so a rejected wire
+    // never burns a sender's quota.
+    this.quotaCountsFile = path.join(dataDir, 'quota-counts.json');
+    this.quotaCounts = fs.existsSync(this.quotaCountsFile)
+      ? JSON.parse(fs.readFileSync(this.quotaCountsFile, 'utf8'))
+      : {};
     // Append-only audit trail of operator (admin-token) mutations: grants,
     // suspensions, removals, report resolutions. Separate from everything else
     // because it answers a different question — "who changed what, when, from
@@ -161,6 +177,48 @@ export class Storage {
     const cur = this.getAllowlist(recipient);
     this.allowlist[recipient] = { mode: mode === true, entries: cur.entries };
     atomicWrite(this.allowlistFile, JSON.stringify(this.allowlist, null, 2));
+  }
+
+  // --- Per-sender quotas ---
+  // A recipient caps how many wires/day any single non-allowlisted sender can
+  // deliver. Allowlisted senders are exempt. 0 (or absent) = unlimited.
+  getQuota(recipient) {
+    const q = Object.hasOwn(this.quotas, recipient) ? this.quotas[recipient] : {};
+    return { perSenderDailyMax: Number.isFinite(q.perSenderDailyMax) ? q.perSenderDailyMax : 0 };
+  }
+
+  setQuota(recipient, max) {
+    const n = Math.max(0, Math.floor(Number(max) || 0));
+    this.quotas[recipient] = { perSenderDailyMax: n };
+    atomicWrite(this.quotasFile, JSON.stringify(this.quotas, null, 2));
+    return n;
+  }
+
+  // How many wires has this sender delivered to this recipient today?
+  // Counts are pruned to today only on each access (cheap, keeps the file small).
+  todaySenderCount(from, to) {
+    const today = new Date().toISOString().slice(0, 10);
+    // Prune old days lazily — keep only today.
+    for (const day of Object.keys(this.quotaCounts)) {
+      if (day !== today) delete this.quotaCounts[day];
+    }
+    const d = this.quotaCounts[today] || {};
+    const fromMap = Object.hasOwn(d, from) ? d[from] : {};
+    return Object.hasOwn(fromMap, to) ? fromMap[to] : 0;
+  }
+
+  // Increment today's delivery count for a (from, to) pair. Called only after a
+  // wire has passed all checks and is committed to the mailbox.
+  bumpSenderCount(from, to) {
+    const today = new Date().toISOString().slice(0, 10);
+    if (!Object.hasOwn(this.quotaCounts, today)) {
+      // Lazy prune: drop old days when first touching today.
+      this.quotaCounts = { [today]: {} };
+    }
+    if (!Object.hasOwn(this.quotaCounts[today], from)) this.quotaCounts[today][from] = {};
+    const cur = this.quotaCounts[today][from][to] || 0;
+    this.quotaCounts[today][from][to] = cur + 1;
+    atomicWrite(this.quotaCountsFile, JSON.stringify(this.quotaCounts, null, 2));
   }
 
   getReport(id) {

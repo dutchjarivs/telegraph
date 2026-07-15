@@ -284,6 +284,16 @@ export class TelegraphClient {
     return this.#req('GET', '/v1/allowlist', null, { signed: true });
   }
 
+  // Per-sender daily quota: cap non-allowlisted senders to N wires/day.
+  // Allowlisted senders are exempt. 0 = unlimited (the default).
+  async setQuota(perSenderDailyMax) {
+    return this.#req('POST', '/v1/quota', { perSenderDailyMax }, { signed: true });
+  }
+
+  async getQuota() {
+    return this.#req('GET', '/v1/quota', null, { signed: true });
+  }
+
   // A TG- address is already authoritative; anything else is a handle and has
   // to go through the directory. Unlike send(), this does not require the record
   // to verify: you must be able to block a sender whose record is broken or

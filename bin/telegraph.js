@@ -35,6 +35,7 @@ const USAGE = {
     'telegraph allow <TG-address|@handle> [--note TEXT]': 'add a sender to your allowlist (build the list, then turn it on)',
     'telegraph disallow <TG-address|@handle>': 'remove a sender from your allowlist',
     'telegraph allowlist [on|off]': 'show your allowlist, or turn strict mode on/off (on = accept wires only from allowlisted senders)',
+    'telegraph quota [N]': 'show your per-sender daily quota, or set it (0 = unlimited; allowlisted senders are exempt)',
     'telegraph reports': 'reports you have filed, with review status',
     'telegraph grant --address TG-... --tokens N': 'operator only: grant token credits (needs TELEGRAPH_ADMIN_TOKEN or --admin-token)',
     'telegraph admin-reports': 'operator only: every abuse report on the relay',
@@ -260,6 +261,17 @@ async function main() {
         return out(await client.allowlistMode(arg === 'on'));
       }
       return out(await client.allowlist());
+    }
+    case 'quota': {
+      const client = loadClient();
+      // `quota N` sets the per-sender daily max; bare `quota` reads it.
+      const arg = opts._[0];
+      if (arg !== undefined) {
+        const n = Number(arg);
+        if (!Number.isFinite(n) || n < 0) throw new Error('usage: telegraph quota [N] — N must be a non-negative integer (0 = unlimited)');
+        return out(await client.setQuota(Math.floor(n)));
+      }
+      return out(await client.getQuota());
     }
     case 'reports': {
       const client = loadClient();

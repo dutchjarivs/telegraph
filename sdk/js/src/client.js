@@ -226,6 +226,22 @@ export class TelegraphClient {
     return r.blocks ?? [];
   }
 
+  // --- Per-sender quota ---
+  // Cap how many wires/day any single non-allowlisted sender can deliver to
+  // you. Allowlisted senders are exempt. 0 = unlimited (the default).
+  async setQuota(perSenderDailyMax) {
+    this.#requireIdentity();
+    if (typeof perSenderDailyMax !== 'number' || !Number.isFinite(perSenderDailyMax) || perSenderDailyMax < 0) {
+      throw new TelegraphError('client_bad_argument', 'setQuota(perSenderDailyMax): non-negative number (0 = unlimited)');
+    }
+    return this.#req('POST', '/v1/quota', { perSenderDailyMax }, { signed: true });
+  }
+
+  async getQuota() {
+    this.#requireIdentity();
+    return this.#req('GET', '/v1/quota', null, { signed: true });
+  }
+
   // Report a received wire as spam/scam. `wire` is any of: an inbox message
   // (carrying .envelope), a raw envelope object, or a messageId string (only
   // works while the wire is still in your mailbox, i.e. before ack).
