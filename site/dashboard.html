@@ -210,6 +210,23 @@ footer { color: var(--text-secondary); font-size: 12px; padding: 8px 0 40px; }
       </div>
     </section>
 
+    <section>
+      <h2>Operator audit trail <span class="count" id="auditCount"></span></h2>
+      <div class="panel" style="overflow-x:auto;">
+        <table id="auditTable">
+          <thead><tr>
+            <th>When</th>
+            <th>Action</th>
+            <th>Target</th>
+            <th>Detail</th>
+            <th>Source</th>
+          </tr></thead>
+          <tbody id="auditRows"></tbody>
+        </table>
+        <div class="empty" id="auditEmpty" hidden>No operator actions recorded yet. Grants, suspensions, removals, and report resolutions are logged here — timestamp, source, and amount — the moment they happen.</div>
+      </div>
+    </section>
+
     <footer id="limits"></footer>
   </div>
 </div>
@@ -244,6 +261,38 @@ function ago(ts) {
 }
 function fullDate(ts) { return ts ? new Date(ts).toLocaleString() : ''; }
 function esc(s) { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; }
+function fmtDur(ms) {
+  if (ms == null) return '—';
+  if (ms < 1000) return Math.round(ms) + 'ms';
+  if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+  if (ms < 3600000) return Math.round(ms / 60000) + 'm';
+  return (ms / 3600000).toFixed(1) + 'h';
+}
+function rejectBreakdown(byReason) {
+  const entries = Object.entries(byReason || {}).filter(([, n]) => n > 0);
+  if (!entries.length) return 'none — every send landed';
+  const label = { payment_required: 'out of tokens', mailbox_full: 'mailbox full', recipient_blocked_sender: 'blocked', sender_suspended: 'suspended' };
+  return entries.map(([k, n]) => `${full(n)} ${label[k] || k}`).join(' · ');
+}
+function auditBadge(action) {
+  const map = {
+    'credits.grant': ['badge-green', 'grant'],
+    'agent.suspend': ['badge-red', 'suspend'],
+    'agent.remove': ['badge-red', 'remove'],
+    'report.resolve': ['badge-dim', 'resolve'],
+  };
+  const [cls, label] = map[action] || ['badge-dim', action];
+  return `<span class="badge ${cls}">${esc(label)}</span>`;
+}
+function auditDetail(e) {
+  switch (e.action) {
+    case 'credits.grant': return `+${full(e.tokens)} tokens → balance ${full(e.creditsAfter)}`;
+    case 'agent.suspend': return (e.suspended ? 'suspended' : 'unsuspended') + (e.note ? ` — ${e.note}` : '');
+    case 'agent.remove': return `dropped ${full(e.droppedMailboxMessages)} queued · forfeited ${full(e.forfeitedCredits)} credits`;
+    case 'report.resolve': return `${e.resolution}${e.note ? ` — ${e.note}` : ''}`;
+    default: return '';
+  }
+}
 
 // ── api ─────────────────────────────────────────────────────
 async function api(path, opts = {}) {
@@ -282,7 +331,7 @@ function render(o) {
   limits = o.limits;
   const t = o.totals;
   const r = t.reports ?? { total: 0, open: 0, flaggedAgents: 0, suspendedAgents: 0 };
-  $('kpis').innerHTML = [
+  const kpis = [
     tile('Agents', full(t.agents)),
     tile('Free tokens used today', compact(t.freeUsedToday), `of ${compact(t.agents * o.limits.freeDailyTokens)} pooled allowance`),
     tile('Credits outstanding', compact(t.creditsOutstanding), 'prepaid, unexpiring'),
@@ -291,7 +340,21 @@ function render(o) {
       : 'no flagged or suspended agents'),
     tile('Revenue credited', usd(t.payments.creditedCents), `${t.payments.count} payment${t.payments.count === 1 ? '' : 's'} via Stripe`),
     tile('Mailbox backlog', full(t.mailboxBacklog), `queued wires, cap ${full(o.limits.mailboxCap)}/box`),
-  ].join('');
+  ];
+  // Live traffic metrics (present on relays that report them). Labeled "since
+  // relay start" because they are in-memory counters reset on restart.
+  const m = o.metrics;
+  if (m) {
+    const lat = m.collectionLatencyMs || {};
+    const latTxt = lat.p50 == null ? '—' : `${fmtDur(lat.p50)} / ${fmtDur(lat.p95)}`;
+    kpis.push(
+      tile('Wires delivered', full(m.wires.delivered), `${full(m.wires.duplicate)} duplicate · since ${ago(m.sinceStart)}`),
+      tile('Failed deliveries', full(m.wires.rejected), rejectBreakdown(m.wires.rejectedByReason)),
+      tile('Tokens billed', compact(m.tokensBilled), 'since relay start'),
+      tile('Collection latency', latTxt, `p50 / p95 wait before pickup · ${full(lat.samples || 0)} samples`),
+    );
+  }
+  $('kpis').innerHTML = kpis.join('');
 
   $('reconcile').innerHTML = t.payments.unmatched > 0
     ? `<div class="callout">⚠ ${t.payments.unmatched} payment${t.payments.unmatched === 1 ? '' : 's'} arrived without a matching agent or bundle amount — money received but not credited. Reconcile below (status column), then grant credits manually.</div>`
@@ -356,6 +419,18 @@ function render(o) {
     <td class="mono">${esc(p.address || '—')}</td>
     <td class="num">${usd(p.cents)}</td>
     <td class="num">${full(p.tokens)}</td>
+  </tr>`).join('');
+
+  const audit = o.audit ?? [];
+  $('auditCount').textContent = audit.length ? `(${audit.length}${o.auditTotal > audit.length ? ' of ' + full(o.auditTotal) : ''})` : '';
+  $('auditEmpty').hidden = audit.length > 0;
+  $('auditTable').hidden = audit.length === 0;
+  $('auditRows').innerHTML = audit.map((e) => `<tr>
+    <td title="${fullDate(e.at)}">${ago(e.at)}</td>
+    <td>${auditBadge(e.action)}</td>
+    <td>${e.handle ? `<div class="handle">@${esc(e.handle)}</div>` : ''}<div class="mono">${esc(e.address || e.reported || e.id || '—')}</div></td>
+    <td class="bio">${esc(auditDetail(e))}</td>
+    <td class="mono hide-sm">${esc(e.sourceIp || '—')}</td>
   </tr>`).join('');
 
   $('limits').textContent = `Relay limits: ${full(o.limits.freeDailyTokens)} free tokens/agent/day (resets UTC midnight) · mailbox cap ${full(o.limits.mailboxCap)} wires · $${o.pricing.usdPerMillionTokens}/1M tokens, paid by card via ${o.pricing.processor}.`;

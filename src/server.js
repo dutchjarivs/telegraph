@@ -155,6 +155,44 @@ export function createServer({
       ...details,
     });
   };
+  // Lightweight in-memory operational metrics for the operator dashboard. Reset
+  // when the process restarts — always surfaced with `sinceStart` so a figure is
+  // never mistaken for an all-time total. Cheap counters plus a small bounded
+  // reservoir of collection-latency samples (how long a wire waited in the
+  // mailbox before the recipient fetched it), which is the latency that actually
+  // matters for a store-and-forward relay.
+  const LATENCY_RESERVOIR = 1000;
+  const metrics = {
+    since: Date.now(),
+    delivered: 0,
+    duplicate: 0,
+    tokensBilled: 0,
+    rejected: Object.create(null), // reason -> count (policy/quota refusals)
+    latencySamples: [],
+  };
+  const bumpReject = (reason) => { metrics.rejected[reason] = (metrics.rejected[reason] ?? 0) + 1; };
+  const bumpDeliver = (tokens) => { metrics.delivered += 1; metrics.tokensBilled += tokens; };
+  const bumpLatency = (ms) => {
+    if (!(ms >= 0)) return;
+    metrics.latencySamples.push(ms);
+    if (metrics.latencySamples.length > LATENCY_RESERVOIR) metrics.latencySamples.shift();
+  };
+  const metricsSnapshot = () => {
+    const s = metrics.latencySamples.slice().sort((a, b) => a - b);
+    const pct = (p) => (s.length ? s[Math.min(s.length - 1, Math.floor((p / 100) * s.length))] : null);
+    const rejectedTotal = Object.values(metrics.rejected).reduce((a, b) => a + b, 0);
+    return {
+      sinceStart: metrics.since,
+      wires: {
+        delivered: metrics.delivered,
+        duplicate: metrics.duplicate,
+        rejected: rejectedTotal,
+        rejectedByReason: { ...metrics.rejected },
+      },
+      tokensBilled: metrics.tokensBilled,
+      collectionLatencyMs: { p50: pct(50), p95: pct(95), max: s.length ? s[s.length - 1] : null, samples: s.length },
+    };
+  };
   const rateMap = new Map();
   const registerMap = new Map();
   const reportMap = new Map();
@@ -586,6 +624,7 @@ export function createServer({
       const sender = store.getAgent(from);
       if (!sender) return send(res, 401, { error: 'unknown_sender', hint: 'register first: POST /v1/register' });
       if (store.getModeration(from).suspended) {
+        bumpReject('sender_suspended');
         return send(res, 403, {
           error: 'sender_suspended',
           hint: 'this address is suspended from sending after abuse reports — contact the relay operator to appeal; your inbox still works',
@@ -614,6 +653,7 @@ export function createServer({
       // they're blocked costs little (they can rotate keys regardless); lying to
       // an honest sender costs the relay its trustworthiness.
       if (store.isBlocked(to, from)) {
+        bumpReject('recipient_blocked_sender');
         return send(res, 403, {
           error: 'recipient_blocked_sender',
           hint: 'the recipient has blocked this address — the wire was not delivered and you were not charged',
@@ -637,6 +677,7 @@ export function createServer({
         const idemKey = 'k:' + idempotencyKey;
         if (Object.hasOwn(idem, idemKey)) {
           if (idemPruned) store.saveIdempotency(from, idem);
+          metrics.duplicate += 1;
           return send(res, 200, { ok: true, id: idem[idemKey].id, duplicate: true, idempotent: true });
         }
         if (idemPruned) store.saveIdempotency(from, idem);
@@ -660,9 +701,11 @@ export function createServer({
       }
       if (mailbox.some((m) => m.id === id) || Object.hasOwn(seen, id)) {
         if (pruned) store.saveSeen(to, seen);
+        metrics.duplicate += 1;
         return send(res, 200, { ok: true, id, duplicate: true });
       }
       if (mailbox.length >= LIMITS.mailboxCap) {
+        bumpReject('mailbox_full');
         return send(res, 507, { error: 'mailbox_full', hint: 'recipient must fetch and ack before receiving more' });
       }
       // Charge only after every check has passed; duplicates are never charged.
@@ -681,6 +724,7 @@ export function createServer({
       const fromFree = Math.min(tokens, Math.max(0, LIMITS.freeDailyTokens - bill.used));
       const fromCredits = Math.min(tokens - fromFree, bill.credits);
       if (fromFree + fromCredits < tokens) {
+        bumpReject('payment_required');
         return send(res, 402, {
           error: 'payment_required',
           hint: `wire costs ${tokens} tokens; your free daily allowance is used up and prepaid credits are exhausted — buy more token credits by card, see GET /v1/pricing`,
@@ -697,6 +741,7 @@ export function createServer({
       // recipient can still verify it even after the live record is gone.
       mailbox.push({ id, to, from, nonce, ciphertext, ts, sig, receivedAt: Date.now(), senderRecord: sender });
       store.saveMailbox(to, mailbox);
+      bumpDeliver(tokens);
       seen[id] = Date.now();
       store.saveSeen(to, seen);
       // Record the idempotency key now that the wire is committed — never
@@ -818,6 +863,13 @@ export function createServer({
       const ids = new Set(body.ids);
       const mailbox = loadMailbox(auth.address);
       const keep = mailbox.filter((m) => !ids.has(m.id));
+      // Collection latency: how long each acked wire sat in the mailbox before
+      // the recipient picked it up. The signal that matters for a store-and-
+      // forward relay — delivery itself is synchronous.
+      const now = Date.now();
+      for (const m of mailbox) {
+        if (ids.has(m.id) && typeof m.receivedAt === 'number') bumpLatency(now - m.receivedAt);
+      }
       store.saveMailbox(auth.address, keep);
       return send(res, 200, { ok: true, removed: mailbox.length - keep.length, remaining: keep.length });
     }
@@ -1183,6 +1235,11 @@ export function createServer({
             unmatched: unmatched.length,
           },
         },
+        // Live operational metrics since the relay last started: wire volume,
+        // policy rejections (failed deliveries), tokens billed, and collection
+        // latency percentiles. In-memory, so they reset on restart — the
+        // sinceStart timestamp says from when.
+        metrics: metricsSnapshot(),
         agents: agents.sort((a, b) => (b.registeredAt ?? 0) - (a.registeredAt ?? 0)),
         reports,
         payments,
