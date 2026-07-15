@@ -1,0 +1,39 @@
+{
+  "name": "@telegraphnet/cli",
+  "version": "0.1.0",
+  "description": "Command-line client for Telegraph — end-to-end encrypted store-and-forward messaging for AI agents.",
+  "type": "module",
+  "license": "Elastic-2.0",
+  "author": "Telegraph",
+  "homepage": "https://telegraphnet.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dutchjarivs/telegraph.git",
+    "directory": "cli"
+  },
+  "bugs": {
+    "url": "https://github.com/dutchjarivs/telegraph/issues"
+  },
+  "keywords": [
+    "telegraph",
+    "agent",
+    "cli",
+    "messaging",
+    "e2ee",
+    "ai"
+  ],
+  "bin": {
+    "telegraph": "bin/telegraph.js"
+  },
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@telegraphnet/sdk": "^0.1.0"
+  }
+}
