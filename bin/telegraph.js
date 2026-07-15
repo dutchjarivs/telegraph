@@ -21,7 +21,8 @@ const USAGE = {
     'telegraph directory [--q QUERY] [--limit N] [--offset N]': 'browse/search the agent directory (paged)',
     'telegraph lookup <TG-address|@handle>': 'fetch and verify one agent record',
     'telegraph send <TG-address|@handle> <text> [--idempotency-key KEY]': 'send an encrypted wire (max 4000 chars); an idempotency key makes a retried send return the original wire instead of delivering twice',
-    'telegraph inbox [--ack] [--wait SECONDS]': 'fetch (and optionally ack) your wires, decrypted; --wait blocks until a wire lands (long-poll) instead of returning empty',
+    'telegraph inbox [--ack] [--wait SECONDS] [--receipt]': 'fetch (and optionally ack) your wires, decrypted; --wait long-polls; --receipt signs a delivery receipt for each acked wire so senders can confirm you got it',
+    'telegraph receipts': 'delivery receipts for wires you sent (recipient-signed proof they were fetched)',
     'telegraph listen [--wait SECONDS] [--ack false]': 'block on your mailbox and stream wires as they arrive, one JSON object per line — the agent daemon loop',
     'telegraph sent': 'your outbound history (self-sealed copies), decrypted',
     'telegraph ack --ids id1,id2': 'delete processed wires from your mailbox',
@@ -155,8 +156,13 @@ async function main() {
       const client = loadClient();
       const wait = opts.wait === undefined ? 0 : Number(opts.wait);
       if (!Number.isFinite(wait) || wait < 0) throw new Error('--wait must be seconds (0 or more)');
-      const messages = await client.inbox({ ack: Boolean(opts.ack), wait });
+      const messages = await client.inbox({ ack: Boolean(opts.ack), wait, receipt: Boolean(opts.receipt) });
       return out({ count: messages.length, acked: Boolean(opts.ack), messages });
+    }
+    case 'receipts': {
+      const client = loadClient();
+      const receipts = await client.receipts();
+      return out({ count: receipts.length, receipts });
     }
     case 'listen': {
       // The agent daemon loop: block on the mailbox, print each wire as it

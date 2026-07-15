@@ -7,6 +7,7 @@ import {
   registerFields,
   messageFields,
   authFields,
+  receiptFields,
   signFields,
   verifyFields,
   verifyAgentRecord,
@@ -115,7 +116,9 @@ export class TelegraphClient {
   // 0 (the default) is a plain non-blocking read. With a wait, the relay answers
   // the moment a wire lands, so an agent can wait on mail instead of busy-polling.
   // A timeout is not an error — it just comes back empty, and you poll again.
-  async inbox({ ack = false, wait = 0 } = {}) {
+  // receipt: when acking, also send a signed delivery receipt for each wire so
+  // the original sender can later prove (via receipts()) that you fetched it.
+  async inbox({ ack = false, wait = 0, receipt = false } = {}) {
     const path = wait > 0 ? `/v1/inbox?wait=${encodeURIComponent(wait)}` : '/v1/inbox';
     const r = await this.#req('GET', path, null, { signed: true });
     const messages = (r.messages ?? []).map((m) => {
@@ -147,13 +150,58 @@ export class TelegraphClient {
       };
     });
     if (ack && messages.length) {
-      await this.ack(messages.map((m) => m.id));
+      const receipts = receipt ? messages.map((m) => this.#makeReceipt(m.id, m.from)) : undefined;
+      await this.ack(messages.map((m) => m.id), { receipts });
     }
     return messages;
   }
 
-  async ack(ids) {
-    return this.#req('POST', '/v1/inbox/ack', { ids }, { signed: true });
+  // A recipient-signed delivery receipt binding (messageId, sender, recipient).
+  #makeReceipt(messageId, from) {
+    const at = Date.now();
+    const sig = signFields(receiptFields(messageId, from, this.identity.address, at), this.identity.signSecretKey);
+    return { messageId, at, sig };
+  }
+
+  // Delivery receipts for wires you sent — recipient-signed proof they were
+  // fetched and acked. Each is verified here against the recipient's registered
+  // signing key over (messageId, you, recipient, at); verified=true means the
+  // proof holds. verified=false means the recipient's record didn't verify or
+  // the signature didn't check — don't trust it.
+  async receipts() {
+    const r = await this.#req('GET', '/v1/receipts', null, { signed: true });
+    const list = r.receipts ?? [];
+    const keyCache = new Map();
+    const out = [];
+    for (const rc of list) {
+      if (!keyCache.has(rc.recipient)) {
+        let key = null;
+        try {
+          const rec = await this.lookup(rc.recipient);
+          key = rec.verified ? rec.signPublicKey : null;
+        } catch {
+          key = null;
+        }
+        keyCache.set(rc.recipient, key);
+      }
+      const key = keyCache.get(rc.recipient);
+      const verified = key
+        ? verifyFields(receiptFields(rc.messageId, this.identity.address, rc.recipient, rc.at), rc.sig, key)
+        : false;
+      out.push({
+        messageId: rc.messageId,
+        recipient: rc.recipient,
+        recipientHandle: rc.recipientHandle ?? null,
+        at: rc.at,
+        verified,
+      });
+    }
+    return out;
+  }
+
+  async ack(ids, { receipts } = {}) {
+    const body = receipts && receipts.length ? { ids, receipts } : { ids };
+    return this.#req('POST', '/v1/inbox/ack', body, { signed: true });
   }
 
   // Decrypted history of your own outbound wires (the self-sealed copies the

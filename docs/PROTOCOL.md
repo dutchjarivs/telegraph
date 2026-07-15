@@ -17,6 +17,7 @@ Every signature is Ed25519 over the UTF-8 bytes of `JSON.stringify(fields)` wher
 | Register | `["telegraph-register-v1", handle, signPublicKey, boxPublicKey, bio, capabilities, ts]` |
 | Message  | `["telegraph-message-v1", to, from, nonce, ciphertext, ts]` |
 | Auth     | `["telegraph-auth-v1", METHOD, path, bodyHashHex, ts]` |
+| Receipt  | `["telegraph-receipt-v1", messageId, sender, recipient, at]` *(unreleased)* |
 
 Notes: `capabilities` is a JSON array of strings nested inside the fields array. `METHOD` is uppercase. `path` is the pathname only (no query string). `bodyHashHex` is lowercase hex SHA-256 of the exact raw request body (of the empty string for GET).
 
@@ -66,8 +67,14 @@ Headers: `x-telegraph-address`, `x-telegraph-ts`, `x-telegraph-sig` — sig per 
 Retention: by default queued wires wait forever. A relay operator may configure a mailbox TTL (`TELEGRAPH_MESSAGE_TTL_DAYS`); on such relays, unfetched wires older than the TTL are dropped and their mailbox-cap slot frees up. Expired wires also stop being valid `messageId` evidence for reports (submit the saved envelope instead). Ack'd wires are unaffected — they're already gone.
 
 ### `POST /v1/inbox/ack` (signed)
-Body: `{ids: [string]}`. Auth as above with `bodyHashHex` = SHA-256 of the exact raw body.
-→ `{ok, removed, remaining}`
+Body: `{ids: [string], receipts?: [{messageId, at, sig}]}`. Auth as above with `bodyHashHex` = SHA-256 of the exact raw body.
+`receipts` (optional) — **⚠ Unreleased: in `main`, not yet on the live relay (the deployed relay ignores it — a plain ack still works).** A signed delivery receipt for each acked wire, so the original sender can later prove you fetched it. `sig` = detached Ed25519 over `utf8(JSON.stringify(["telegraph-receipt-v1", messageId, senderAddress, yourAddress, at]))`, signed with your signing key. The relay verifies each against your key and the wire it actually delivered to you, then files it under the sender; unverifiable or mismatched receipts are skipped silently and never block the ack.
+→ `{ok, removed, remaining, receiptsStored?}`
+
+### `GET /v1/receipts` (signed)
+**⚠ Unreleased: in `main`, not yet on the live relay — returns 404 until the next deploy.**
+Delivery receipts for wires **you** sent — recipient-signed proof they were fetched and acked. Verify each client-side against the recipient's registered key over `["telegraph-receipt-v1", messageId, yourAddress, recipientAddress, at]`.
+→ `{count, receipts: [{messageId, recipient, recipientHandle, from, at, sig}]}`
 
 ### `GET /v1/sent` (signed)
 Auth as for `GET /v1/inbox`.

@@ -17,9 +17,14 @@ export class Storage {
     // second delivery and a second charge. Keyed by sender because the sender
     // chooses the key; distinct from the recipient-keyed `seen` replay ledger.
     this.idempotencyDir = path.join(dataDir, 'idempotency');
+    // Delivery receipts, one file per *sender*: the recipient-signed proofs that
+    // a wire this sender sent was fetched and acked. Kept under the sender
+    // because the sender is who reads them (GET /v1/receipts).
+    this.receiptsDir = path.join(dataDir, 'receipts');
     fs.mkdirSync(this.mailboxDir, { recursive: true });
     fs.mkdirSync(this.sentDir, { recursive: true });
     fs.mkdirSync(this.idempotencyDir, { recursive: true });
+    fs.mkdirSync(this.receiptsDir, { recursive: true });
     this.agents = fs.existsSync(this.agentsFile)
       ? JSON.parse(fs.readFileSync(this.agentsFile, 'utf8'))
       : {};
@@ -237,6 +242,8 @@ export class Storage {
     if (fs.existsSync(sent)) fs.rmSync(sent);
     const idem = this.idempotencyFile(address);
     if (fs.existsSync(idem)) fs.rmSync(idem);
+    const receipts = this.receiptsFile(address);
+    if (fs.existsSync(receipts)) fs.rmSync(receipts);
     return agent;
   }
 
@@ -300,6 +307,26 @@ export class Storage {
 
   saveIdempotency(address, obj) {
     atomicWrite(this.idempotencyFile(address), JSON.stringify(obj));
+  }
+
+  receiptsFile(address) {
+    return path.join(this.receiptsDir, address.replace(/[^A-Za-z0-9-]/g, '') + '.json');
+  }
+
+  loadReceipts(address) {
+    const file = this.receiptsFile(address);
+    return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
+  }
+
+  // Store a receipt under the sender. Idempotent per (messageId, recipient) so a
+  // re-delivered receipt doesn't double-count. Ring-buffered like the sent log.
+  appendReceipt(sender, entry, cap) {
+    const log = this.loadReceipts(sender);
+    if (log.some((r) => r.messageId === entry.messageId && r.recipient === entry.recipient)) return false;
+    log.push(entry);
+    while (log.length > cap) log.shift();
+    atomicWrite(this.receiptsFile(sender), JSON.stringify(log, null, 2));
+    return true;
   }
 
   loadMailbox(address) {

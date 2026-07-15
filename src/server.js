@@ -10,6 +10,7 @@ import {
   registerFields,
   messageFields,
   authFields,
+  receiptFields,
   verifyFields,
   deriveAddress,
   fromB64,
@@ -44,6 +45,7 @@ export const DEFAULT_LIMITS = {
   freeDailyTokens: 500, // free tokens per sender per UTC day
   bytesPerToken: 4, // token estimate: relay can't read plaintext, so ~4 ciphertext bytes ≈ 1 token
   sentLogCap: 200, // self-sealed sent copies kept per agent (ring buffer, not billed)
+  receiptLogCap: 500, // delivery receipts kept per sender (ring buffer)
   reportRate: { windowMs: 24 * 60 * 60_000, max: 20 }, // abuse reports per reporter per day
   reportCommentChars: 500,
   idempotencyKeyChars: 128, // max length of a client-supplied idempotency key
@@ -864,6 +866,18 @@ export function createServer({
       return send(res, 200, { count: messages.length, messages });
     }
 
+    if (route === 'GET /v1/receipts') {
+      // Delivery receipts for wires you sent: recipient-signed proof that a wire
+      // was fetched and acked. Each is verifiable client-side against the
+      // recipient's key over (messageId, sender, recipient, at).
+      const auth = checkAuth(req, url.pathname, sha256hex(''));
+      if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
+      const receipts = store.loadReceipts(auth.address)
+        .map((r) => ({ ...r, recipientHandle: store.getAgent(r.recipient)?.handle ?? null }))
+        .sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
+      return send(res, 200, { count: receipts.length, receipts });
+    }
+
     if (route === 'POST /v1/inbox/ack') {
       const raw = await readRaw(req);
       const auth = checkAuth(req, url.pathname, sha256hex(raw));
@@ -882,8 +896,31 @@ export function createServer({
       for (const m of mailbox) {
         if (ids.has(m.id) && typeof m.receivedAt === 'number') bumpLatency(now - m.receivedAt);
       }
+      // Optional signed delivery receipts. The recipient may include a receipt
+      // for each wire it is acking; the relay verifies each against the
+      // recipient's own key and the wire it actually delivered, then files it
+      // under the sender for GET /v1/receipts. Unverifiable or mismatched
+      // receipts are skipped silently — a bad receipt never blocks the ack.
+      let receiptsStored = 0;
+      if (Array.isArray(body.receipts) && body.receipts.length) {
+        const recipientKey = store.getAgent(auth.address)?.signPublicKey;
+        const byId = new Map(mailbox.map((m) => [m.id, m]));
+        for (const rc of recipientKey ? body.receipts : []) {
+          if (!rc || typeof rc.messageId !== 'string' || typeof rc.sig !== 'string' || typeof rc.at !== 'number') continue;
+          if (!ids.has(rc.messageId)) continue; // only for wires being acked in this call
+          const entry = byId.get(rc.messageId);
+          if (!entry) continue; // not actually in this recipient's mailbox
+          // The receipt is signed by the recipient (this authed address) and
+          // binds (messageId, sender, recipient). Verify against the recipient's
+          // registered signing key.
+          if (!verifyFields(receiptFields(rc.messageId, entry.from, auth.address, rc.at), rc.sig, recipientKey)) continue;
+          if (store.appendReceipt(entry.from, { messageId: rc.messageId, recipient: auth.address, from: entry.from, at: rc.at, sig: rc.sig }, LIMITS.receiptLogCap)) {
+            receiptsStored += 1;
+          }
+        }
+      }
       store.saveMailbox(auth.address, keep);
-      return send(res, 200, { ok: true, removed: mailbox.length - keep.length, remaining: keep.length });
+      return send(res, 200, { ok: true, removed: mailbox.length - keep.length, remaining: keep.length, ...(receiptsStored ? { receiptsStored } : {}) });
     }
 
     if (route === 'GET /v1/credits') {
@@ -1459,6 +1496,7 @@ export function createServer({
         'POST /v1/allowlist/remove (signed)',
         'POST /v1/allowlist/mode (signed — {enabled} strict on/off)',
         'GET /v1/allowlist (signed)',
+        'GET /v1/receipts (signed — delivery receipts for wires you sent)',
         'GET /owner (owner console UI)',
         'POST /v1/credits/grant (admin)',
         'GET /v1/admin/overview (admin)',
