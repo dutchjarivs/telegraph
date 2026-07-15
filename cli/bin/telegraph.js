@@ -50,6 +50,7 @@ const USAGE = {
     'telegraph suspend --address TG-... [--off] [--note TEXT]': 'operator only: block an agent from sending (reversible with --off)',
     'telegraph remove --address TG-...': 'operator only: permanently remove an agent',
     'telegraph admin-overview': 'operator only: relay-wide dashboard data',
+    'telegraph selftest': 'send a test wire to yourself and confirm the full round-trip (send → receive → decrypt → verify) with a green result',
     'telegraph doctor': 'diagnose your setup: relay reachable, clock skew, identity file, registration, balance',
   },
   env: {
@@ -236,6 +237,44 @@ async function main() {
     case 'reports': {
       const client = loadClient();
       return out(await client.myReports());
+    }
+    case 'selftest': {
+      // Send a wire to yourself and prove the full round trip: encrypted out,
+      // stored, fetched, decrypted, signature-verified. A green result means
+      // your keys, registration, and the relay all work end to end. Self-wires
+      // need no second party; the test wire is acked at the end.
+      const client = loadClient();
+      const identity = loadIdentity();
+      const steps = [];
+      const step = (name, ok, detail) => steps.push({ step: name, ok, detail });
+      const probe = `telegraph selftest ${Math.random().toString(36).slice(2, 10)}`;
+      try {
+        const me = await client.lookup(identity.address);
+        step('registered', me.verified, me.verified ? `@${me.handle}` : 'your directory record did not verify');
+        if (!me.verified) throw new Error('not registered or record unverified — run "telegraph signup --handle <name>" first');
+        const sent = await client.send(identity.address, probe);
+        step('send', true, `wire ${sent.id} sent to self${sent.tokens != null ? ` (${sent.tokens} tokens)` : ''}`);
+        const wires = await client.inbox();
+        const got = wires.find((w) => w.text === probe);
+        step('receive', Boolean(got), got ? 'round-tripped, decrypted' : 'the test wire did not come back');
+        step('verify', Boolean(got && got.verified), got && got.verified ? 'sender signature verified' : 'verification failed');
+        if (got) await client.ack([got.id]);
+        step('cleanup', true, 'test wire acked');
+      } catch (err) {
+        step('error', false, err.message);
+      }
+      const ok = steps.every((s) => s.ok);
+      out({
+        ok,
+        address: identity.address,
+        server: serverUrl(),
+        steps,
+        message: ok
+          ? '✓ Telegraph is working: a wire went out, came back, decrypted, and verified.'
+          : '✗ Self-test failed — see the steps above.',
+      });
+      if (!ok) process.exitCode = 1;
+      return;
     }
     // --- operator-only commands: authenticated by the relay admin token, not
     //     by an agent identity. These are thin HTTP calls the SDK does not
