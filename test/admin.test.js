@@ -60,6 +60,26 @@ test('overview joins agents with billing and mailbox depth', async () => {
   assert.deepEqual(body.payments, []);
 });
 
+test('overview surfaces webhook registrations (never the secret) and totals', async () => {
+  const hooked = new TelegraphClient({ server: base, identity: TelegraphClient.generateIdentity() });
+  await hooked.register({ handle: 'hooked' });
+  const reg = await hooked.setWebhook('https://hooks.example.com/admin-view');
+  assert.ok(reg.secret);
+
+  const { body } = await adminFetch('/v1/admin/overview');
+  assert.equal(body.webhooks.registered, 1);
+  assert.equal(body.webhooks.disabled, 0);
+  const entry = body.agents.find((a) => a.handle === 'hooked');
+  assert.equal(entry.webhook.url, 'https://hooks.example.com/admin-view');
+  assert.equal(entry.webhook.disabled, false);
+  // The per-hook secret must never appear anywhere in the operator payload.
+  assert.ok(!JSON.stringify(body).includes(reg.secret), 'webhook secret is not exposed in admin overview');
+
+  // Clean up so it doesn't perturb the agent-count assertions in later tests.
+  await hooked.removeWebhook();
+  await adminFetch('/v1/admin/agents/remove', { method: 'POST', body: JSON.stringify({ address: hooked.identity.address }) });
+});
+
 test('remove drops the agent, its billing, and its mailbox', async () => {
   const bobAddress = bob.identity.address;
   const { status, body } = await adminFetch('/v1/admin/agents/remove', {
