@@ -117,32 +117,58 @@ for now, leaving signing-key migration (the harder half) for later?
 
 ---
 
-## 4. Attachments via encrypted blobs
+## 4. Attachments via encrypted blobs (green-lit 2026-07-15)
 
-**Why deferred:** a storage-shape and quota decision, not just an endpoint. Wires
-are currently small (16 KB ciphertext cap); blobs are a different size class and
-change the relay's disk/backup/billing profile.
+**Constraint from green light:** meter under the *existing* per-wire token pricing.
+No new storage meter, no separate blob billing, no Stripe/checkout changes,
+no price changes. Conservative default: treat attachments as "large wires" that
+simply consume more tokens on send (ciphertext size → tokens). No new quota
+system, no TTL, no separate storage accounting.
 
-**Recommended design — content-addressed sealed blobs:**
-- Sender encrypts the blob with a fresh symmetric key (nacl.secretbox), uploads
-  the ciphertext to `POST /v1/blobs` → gets a blob id (content hash). The relay
-  stores opaque bytes it can't read, with a size cap and a TTL.
-- The **wire** (the small sealed message) carries the blob id + the symmetric key
-  + the content hash, inside the E2E plaintext envelope (see #1). Only the
-  recipient can fetch (`GET /v1/blobs/:id`) and decrypt; the relay sees ciphertext
-  and never the key.
-- Billing: blobs metered by stored bytes × days (a different meter than per-wire
-  tokens) — **this is a pricing decision, which the mandate excluded**, so it
-  needs Tristan regardless.
-- Quotas: per-agent total blob bytes, blob TTL, max blob size. Backups must
-  account for blob volume (the current backup snapshots JSON docs; blobs would
-  need a separate, size-aware path or explicit exclusion).
+**Why previously deferred:** wires are small (16 KB ciphertext cap). A true
+attachment path changes disk profile, backup strategy, and (normally) billing.
 
-**Effort:** high, and it **crosses into pricing** (excluded item 4). Recommend
-scoping the free/paid blob quota with Tristan before any code.
+**Recommended design — large-ciphertext wires (no new meter):**
+- Raise (or add a parallel) ciphertext size cap for messages that carry
+  attachments (e.g. 5–10 MB). The existing token formula already scales:
+  `tokens = max(1, ceil((ciphertextBytes - 16) / 4))`. A 5 MB attachment is
+  simply ~1.25 M tokens on send — metered exactly like any other wire.
+- The **plaintext inside the box** becomes a versioned envelope (see threading
+  design #1) that can contain either:
+  - a bare string (current behavior), or
+  - `{"v":1,"text":"…","attachments":[{"name":"…","mime":"…","size":N,"ciphertext":"…"}]}`
+  where each attachment's `ciphertext` is the sealed blob (nacl.secretbox or
+  streamed box).
+- Receiver decrypts the wire, sees the attachment list, and can fetch the
+  blobs from the same `ciphertext` fields (or a new optional `blobRef` if we
+  later want content-addressed dedup). No separate blob endpoint required for
+  v1.
+- Capability gate: only advertise the larger cap + attachment envelope to
+  recipients that list `wire-envelope-v1` (or a new `attachments-v1` cap).
+  Old clients never see JSON they can't parse.
+- Relay change: minimal — just a higher `ciphertextB64` limit on the message
+  path (or a parallel `/v1/messages/large` route that funnels to the same
+  mailbox logic). No new storage table, no TTL, no per-agent blob quota.
+- Backup: the existing mailbox JSON snapshots continue to work; large
+  ciphertext is just bigger JSON values. No new backup path needed.
 
-**Open question for Tristan:** attachments unavoidably touch pricing (storage
-isn't free). Want a design pass on the economics first, or defer entirely?
+**Security / abuse:** the relay already rate-limits and quotas senders. A 5 MB
+wire is expensive in tokens, so abuse is self-throttling. No new SSRF or
+storage vectors because the relay never interprets the ciphertext.
+
+**SDK surface (additive):**
+- `send(to, text, { attachments: [{name, mime, data: Uint8Array}] })`
+- `inbox()` messages gain `attachments: [{name, mime, size, data: Uint8Array}]`
+  (decrypted for the caller).
+
+**Effort:** medium-high (mostly SDK + test matrix). Relay change is a one-line
+size-cap bump or a thin wrapper route. No pricing, no Stripe, no wallet touch.
+
+**Conservative default taken:** attachments are simply "wires with bigger
+ciphertext" metered by the existing token formula. No separate storage billing,
+no new quota, no TTL. If Tristan later wants dedicated blob storage with its
+own economics, that becomes a follow-up design (explicitly flagged as a pricing
+choice).
 
 ---
 
