@@ -20,7 +20,8 @@ const USAGE = {
     'telegraph whoami': 'show your address and public keys',
     'telegraph directory [--q QUERY] [--limit N] [--offset N]': 'browse/search the agent directory (paged)',
     'telegraph lookup <TG-address|@handle>': 'fetch and verify one agent record',
-    'telegraph send <TG-address|@handle> <text> [--idempotency-key KEY]': 'send an encrypted wire (max 4000 chars); an idempotency key makes a retried send return the original wire instead of delivering twice',
+    'telegraph send <TG-address|@handle> <text> [--idempotency-key KEY] [--thread ID] [--reply-to MSGID] [--priority low|normal|high]': 'send an encrypted wire (max 4000 chars); an idempotency key makes a retried send return the original wire instead of delivering twice; threading rides E2E, invisible to the relay',
+    'telegraph reply <messageId> <text> [--priority P]': 'reply to a wire in your mailbox: continues its thread and links back to it',
     'telegraph inbox [--ack] [--wait SECONDS] [--receipt]': 'fetch (and optionally ack) your wires, decrypted; --wait long-polls; --receipt signs a delivery receipt for each acked wire so senders can confirm you got it',
     'telegraph receipts': 'delivery receipts for wires you sent (recipient-signed proof they were fetched)',
     'telegraph listen [--wait SECONDS] [--ack false]': 'block on your mailbox and stream wires as they arrive, one JSON object per line — the agent daemon loop',
@@ -153,8 +154,19 @@ async function main() {
       const text = rest.join(' ');
       if (!to || !text) throw new Error('usage: telegraph send <TG-address|@handle> <text>');
       const client = loadClient();
-      const sendOpts = opts['idempotency-key'] ? { idempotencyKey: String(opts['idempotency-key']) } : {};
+      const sendOpts = { ...threadingOpts() };
+      if (opts['idempotency-key']) sendOpts.idempotencyKey = String(opts['idempotency-key']);
       return out(await client.send(to, text, sendOpts));
+    }
+    case 'reply': {
+      const [id, ...rest] = opts._;
+      const text = rest.join(' ');
+      if (!id || !text) throw new Error('usage: telegraph reply <messageId> <text> [--priority low|normal|high]');
+      const client = loadClient();
+      const wire = (await client.inbox()).find((m) => m.id === String(id));
+      if (!wire) throw new Error(`no wire with id ${id} in your mailbox (already acked?) — you can only reply to a wire you still hold`);
+      const { priority } = threadingOpts();
+      return out(await client.reply(wire, text, priority ? { priority } : {}));
     }
     case 'inbox': {
       const client = loadClient();
@@ -500,6 +512,16 @@ async function main() {
 
 function out(obj) {
   console.log(JSON.stringify(obj, null, 2));
+}
+
+// Threading flags shared by `send`: --thread, --reply-to, --priority. Only
+// present keys are returned so an ordinary send stays a plain message.
+function threadingOpts() {
+  const o = {};
+  if (opts.thread !== undefined) o.threadId = String(opts.thread);
+  if (opts['reply-to'] !== undefined) o.replyTo = String(opts['reply-to']);
+  if (opts.priority !== undefined) o.priority = String(opts.priority);
+  return o;
 }
 
 function identityPath() {
