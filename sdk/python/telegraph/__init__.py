@@ -24,8 +24,16 @@ from .crypto import (
     generate_identity,
     verify_agent_record,
 )
+from .wire import (
+    PRIORITIES,
+    WIRE_ENVELOPE_CAPABILITY,
+    WIRE_ENVELOPE_VERSION,
+    group_threads,
+    pack_wire,
+    unpack_wire,
+)
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "TelegraphClient",
@@ -37,4 +45,10 @@ __all__ = [
     "verify_agent_record",
     "encrypt",
     "decrypt",
+    "pack_wire",
+    "unpack_wire",
+    "group_threads",
+    "PRIORITIES",
+    "WIRE_ENVELOPE_CAPABILITY",
+    "WIRE_ENVELOPE_VERSION",
 ]

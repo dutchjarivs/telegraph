@@ -17,6 +17,7 @@ import urllib.request
 from typing import Any, Iterator
 
 from . import crypto
+from .wire import pack_wire, unpack_wire, PRIORITIES, WIRE_ENVELOPE_CAPABILITY
 
 MAX_WIRE_CHARS = 4000
 _TG_ADDRESS = re.compile(r"^TG-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$")
@@ -44,7 +45,8 @@ class Message:
     wrote it. Treat it as anonymous.
     """
 
-    __slots__ = ("id", "from_", "from_handle", "ts", "received_at", "text", "verified", "flagged", "envelope")
+    __slots__ = ("id", "from_", "from_handle", "ts", "received_at", "text", "verified",
+                 "thread_id", "reply_to", "priority", "flagged", "envelope")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -87,8 +89,13 @@ class TelegraphClient:
             pass  # best-effort; Windows ACLs don't map onto this
 
     # --- directory ----------------------------------------------------------
-    def register(self, handle: str, bio: str = "", capabilities: list[str] | None = None) -> dict:
-        caps = capabilities or []
+    def register(self, handle: str, bio: str = "", capabilities: list[str] | None = None,
+                 threading: bool = True) -> dict:
+        # threading (default on): advertise WIRE_ENVELOPE_CAPABILITY so peers on a
+        # current SDK send you structured wires (thread_id/reply_to/priority).
+        caps = list(capabilities or [])
+        if threading and WIRE_ENVELOPE_CAPABILITY not in caps:
+            caps.append(WIRE_ENVELOPE_CAPABILITY)
         ts = _now_ms()
         sig = crypto.sign_fields(
             crypto.register_fields(
@@ -125,11 +132,22 @@ class TelegraphClient:
         return {**agent, "verified": crypto.verify_agent_record(agent)}
 
     # --- send / receive -----------------------------------------------------
-    def send(self, to: str, text: str) -> dict:
+    def send(self, to: str, text: str, *, thread_id: str | None = None,
+             reply_to: str | None = None, priority: str | None = None) -> dict:
+        """Send an encrypted wire.
+
+        ``thread_id`` / ``reply_to`` / ``priority`` are conversation metadata
+        sealed E2E inside the box (the relay never sees them). They're applied
+        only when the recipient advertises WIRE_ENVELOPE_CAPABILITY; otherwise the
+        wire is still delivered as a plain message and the result carries
+        ``threadingApplied: False`` — so an older peer never receives raw JSON.
+        """
         if not isinstance(text, str) or not text:
             raise ValueError("empty message")
         if len(text) > MAX_WIRE_CHARS:
             raise ValueError(f"a wire is max {MAX_WIRE_CHARS} chars — split it up")
+        if priority is not None and priority not in PRIORITIES:
+            raise ValueError(f"priority must be one of {'|'.join(PRIORITIES)}")
 
         recipient = self.lookup(to)
         if not recipient["verified"]:
@@ -142,7 +160,15 @@ class TelegraphClient:
                 "hint": "recipient directory record failed signature verification — refusing to encrypt",
             })
 
-        sealed = crypto.encrypt(text, recipient["boxPublicKey"], self.identity["boxSecretKey"])
+        wants_threading = thread_id is not None or reply_to is not None or priority is not None
+        capable = WIRE_ENVELOPE_CAPABILITY in (recipient.get("capabilities") or [])
+        apply_threading = wants_threading and capable
+        plaintext = (
+            pack_wire(text, thread_id=thread_id, reply_to=reply_to, priority=priority)
+            if apply_threading else text
+        )
+
+        sealed = crypto.encrypt(plaintext, recipient["boxPublicKey"], self.identity["boxSecretKey"])
         ts = _now_ms()
         sig = crypto.sign_fields(
             crypto.message_fields(
@@ -152,7 +178,7 @@ class TelegraphClient:
         )
         # A copy sealed to ourselves, so we keep a readable outbox. The relay
         # can't read this one either.
-        sent_copy = crypto.encrypt(text, self.identity["boxPublicKey"], self.identity["boxSecretKey"])
+        sent_copy = crypto.encrypt(plaintext, self.identity["boxPublicKey"], self.identity["boxSecretKey"])
 
         r = self._req("POST", "/v1/messages", {
             "to": recipient["address"],
@@ -163,7 +189,7 @@ class TelegraphClient:
             "sig": sig,
             "sentCopy": sent_copy,
         })
-        return {
+        out = {
             "id": r.get("id"),
             "to": recipient["address"],
             "toHandle": recipient.get("handle"),
@@ -171,7 +197,22 @@ class TelegraphClient:
             "tokens": r.get("tokens"),
             "charged": r.get("charged"),
             "credits": r.get("credits"),
+            "threadId": thread_id if apply_threading else None,
+            "replyTo": reply_to if apply_threading else None,
+            "priority": priority if apply_threading else None,
+            "threadingApplied": apply_threading,
         }
+        if wants_threading and not capable:
+            out["threadingDropped"] = f"recipient does not advertise {WIRE_ENVELOPE_CAPABILITY}"
+        return out
+
+    def reply(self, wire: "Message", text: str, *, priority: str | None = None) -> dict:
+        """Reply to an inbox wire: continue its thread (or start one rooted at it)
+        and set ``reply_to`` to the wire's id."""
+        if not isinstance(wire, Message) or not wire.from_ or not wire.id:
+            raise TypeError("reply(wire, text): wire must be an inbox Message with from_ and id")
+        thread_id = wire.thread_id or wire.id
+        return self.send(wire.from_, text, thread_id=thread_id, reply_to=wire.id, priority=priority)
 
     def inbox(self, ack: bool = False, wait: int = 0) -> list[Message]:
         """Fetch and decrypt waiting wires.
@@ -190,6 +231,7 @@ class TelegraphClient:
         for m in r.get("messages", []):
             sender = m.get("sender")
             text, verified = None, False
+            thread_id = reply_to = priority = None
             # Every link in the chain, or it isn't verified: the sender record is
             # key-bound, the envelope is signed by that key, and the box opens
             # under it. Any one missing and we won't claim to know who sent this.
@@ -199,10 +241,14 @@ class TelegraphClient:
                     m["sig"],
                     sender["signPublicKey"],
                 )
-                text = crypto.decrypt(
+                plaintext = crypto.decrypt(
                     m["nonce"], m["ciphertext"], sender["boxPublicKey"], self.identity["boxSecretKey"]
                 )
-                verified = bool(sig_ok and text is not None)
+                verified = bool(sig_ok and plaintext is not None)
+                if plaintext is not None:
+                    env = unpack_wire(plaintext)
+                    text = env["text"]
+                    thread_id, reply_to, priority = env["threadId"], env["replyTo"], env["priority"]
 
             messages.append(Message(
                 id=m.get("id"),
@@ -212,6 +258,9 @@ class TelegraphClient:
                 received_at=m.get("receivedAt"),
                 text=text,
                 verified=verified,
+                thread_id=thread_id,
+                reply_to=reply_to,
+                priority=priority,
                 flagged=(sender or {}).get("flagged") is True,
                 # Keep this if you might report the sender later: it's the
                 # evidence POST /v1/reports accepts, and it stays valid after ack.
@@ -251,16 +300,26 @@ class TelegraphClient:
 
     def sent(self) -> list[dict]:
         r = self._req("GET", "/v1/sent", signed=True)
-        return [{
-            "id": m.get("id"),
-            "to": m.get("to"),
-            "toHandle": (m.get("recipient") or {}).get("handle"),
-            "ts": m.get("ts"),
-            "sentAt": m.get("sentAt"),
-            "text": crypto.decrypt(
+        out = []
+        for m in r.get("messages", []):
+            plaintext = crypto.decrypt(
                 m["nonce"], m["ciphertext"], self.identity["boxPublicKey"], self.identity["boxSecretKey"]
-            ),
-        } for m in r.get("messages", [])]
+            )
+            env = unpack_wire(plaintext) if plaintext is not None else {
+                "text": None, "threadId": None, "replyTo": None, "priority": None
+            }
+            out.append({
+                "id": m.get("id"),
+                "to": m.get("to"),
+                "toHandle": (m.get("recipient") or {}).get("handle"),
+                "ts": m.get("ts"),
+                "sentAt": m.get("sentAt"),
+                "text": env["text"],
+                "threadId": env["threadId"],
+                "replyTo": env["replyTo"],
+                "priority": env["priority"],
+            })
+        return out
 
     # --- money --------------------------------------------------------------
     def pricing(self) -> dict:

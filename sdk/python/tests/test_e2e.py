@@ -152,6 +152,85 @@ def test_javascript_sends_and_python_reads_it(relay):
     assert msgs[0].from_handle == "js-sender"
 
 
+def test_python_threads_and_javascript_reads_the_thread(relay):
+    """A threaded wire packed in Python must unpack in the JavaScript SDK."""
+    py = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    js_identity = TelegraphClient.generate_identity()
+    js = TelegraphClient(relay, identity=js_identity)
+    py.register(handle="py-thr-sender")
+    js.register(handle="js-thr-reader")  # register() advertises wire-envelope-v1
+
+    sent = py.send("@js-thr-reader", "threaded from python", thread_id="cross-1", priority="high")
+    assert sent["threadingApplied"] is True
+
+    out = node_client_script(relay, js_identity, """
+        const msgs = await tg.inbox();
+        process.stdout.write(JSON.stringify(msgs.map((m) => ({
+          text: m.text, threadId: m.threadId, priority: m.priority, verified: m.verified,
+        }))));
+    """)
+    assert len(out) == 1
+    assert out[0]["text"] == "threaded from python"
+    assert out[0]["threadId"] == "cross-1"
+    assert out[0]["priority"] == "high"
+    assert out[0]["verified"] is True
+
+
+def test_javascript_threads_and_python_reads_the_thread(relay):
+    """And the other direction: JS packs the envelope, Python unpacks it."""
+    py_identity = TelegraphClient.generate_identity()
+    py = TelegraphClient(relay, identity=py_identity)
+    js_identity = TelegraphClient.generate_identity()
+    py.register(handle="py-thr-reader")  # advertises the capability
+    TelegraphClient(relay, identity=js_identity).register(handle="js-thr-sender")
+
+    node_client_script(relay, js_identity, """
+        await tg.send('@py-thr-reader', 'threaded from js', { threadId: 'cross-2', replyTo: 'M-42', priority: 'low' });
+        process.stdout.write('{}');
+    """)
+
+    msgs = py.inbox()
+    assert len(msgs) == 1
+    assert msgs[0].text == "threaded from js"
+    assert msgs[0].thread_id == "cross-2"
+    assert msgs[0].reply_to == "M-42"
+    assert msgs[0].priority == "low"
+    assert msgs[0].verified is True
+
+
+def test_python_threading_round_trip_and_reply(relay):
+    a = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    b = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    a.register(handle="py-th-a")
+    b.register(handle="py-th-b")
+
+    opened = a.send("@py-th-b", "ping", thread_id="chat")
+    got = b.inbox(ack=True)
+    assert got[0].thread_id == "chat"
+    replied = b.reply(got[0], "pong")
+    assert replied["threadId"] == "chat"
+    assert replied["replyTo"] == opened["id"]
+    back = a.inbox(ack=True)
+    assert back[0].text == "pong"
+    assert back[0].reply_to == opened["id"]
+
+
+def test_threading_to_an_opted_out_recipient_is_dropped_to_plain(relay):
+    a = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    b = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    a.register(handle="py-drop-a")
+    b.register(handle="py-drop-b", threading=False)  # simulates an old peer
+
+    sent = a.send("@py-drop-b", "plain please", thread_id="nope", priority="high")
+    assert sent["threadingApplied"] is False
+    assert "threadingDropped" in sent
+
+    msgs = b.inbox(ack=True)
+    assert msgs[0].text == "plain please"   # a clean plain message, not raw JSON
+    assert msgs[0].thread_id is None
+    assert msgs[0].verified is True
+
+
 def test_signed_endpoints_all_work_from_python(relay):
     """Every signed route, because each one signs a different path and body."""
     tg = TelegraphClient(relay, identity=TelegraphClient.generate_identity())

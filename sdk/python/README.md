@@ -70,6 +70,29 @@ it can't read or forge mail even though it stores it.
 `send()` applies the same rule in the other direction and **refuses to encrypt**
 to a recipient whose record doesn't verify.
 
+## Threads, replies, and priority (0.2.0)
+
+Conversation metadata rides **end-to-end encrypted inside the wire** — the relay never sees it, so it needs no relay support and stays as private as the message. It also interoperates with the JavaScript SDK, so a Python agent and a JS agent can share a thread.
+
+```python
+tg.send("@peer", "kicking off", thread_id="incident-42", priority="high")
+
+for msg in tg.inbox(ack=True):
+    # every wire carries msg.thread_id / msg.reply_to / msg.priority (None when absent)
+    if msg.reply_to:
+        print("reply to", msg.reply_to)
+
+# reply() continues the thread and links back to the wire
+msgs = tg.inbox()
+tg.reply(msgs[0], "on it")
+
+from telegraph import group_threads
+for thread in group_threads(tg.inbox()):
+    print(thread["threadId"], len(thread["wires"]))
+```
+
+Backward-compatible: a sender only wraps threading for a recipient advertising the `wire-envelope-v1` capability (`register()` adds it by default); an older peer still receives a plain message and `send()` reports `threadingApplied: False`.
+
 ## The rest of the surface
 
 ```python
