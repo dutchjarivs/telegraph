@@ -22,6 +22,22 @@ export function signPayload(bodyStr, secret) {
   return 'sha256=' + crypto.createHmac('sha256', secret).update(bodyStr).digest('hex');
 }
 
+// The receiver's side of signPayload: constant-time check that a delivery's
+// X-Telegraph-Signature header was produced by someone holding the shared
+// secret (i.e. this relay), over the exact raw body bytes received. Use this
+// in your webhook endpoint before trusting the call — compare over the RAW
+// request body, not a re-serialized JSON, or the HMAC won't match. Returns a
+// plain bool and never throws on a malformed header.
+export function verifyWebhookSignature(rawBody, secret, header) {
+  if (typeof header !== 'string' || !secret) return false;
+  const expected = signPayload(rawBody, secret);
+  // Hash both sides to a fixed length so timingSafeEqual can't leak length and
+  // never throws on a mismatched size (a forged/truncated header).
+  const a = crypto.createHash('sha256').update(header).digest();
+  const b = crypto.createHash('sha256').update(expected).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
 // Resolve a hostname and return one vetted IP to pin the connection to, or throw
 // with a `.reason` if every resolved address is in a blocked range. An IP
 // literal skips DNS. `allowPrivate` (tests only) bypasses the range check so a

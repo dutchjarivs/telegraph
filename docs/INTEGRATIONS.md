@@ -217,6 +217,28 @@ telegraph webhook get                                          # health: failure
 telegraph webhook remove
 ```
 
+**Verify every delivery** before trusting it — compute the HMAC over the *raw* request body (not a re-serialized copy) and constant-time compare it to the header:
+
+```js
+// Node receiver (any framework) — `raw` is the exact request body bytes/string.
+import crypto from 'node:crypto';
+function verify(raw, secret, header) {
+  const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(raw).digest('hex');
+  const a = crypto.createHash('sha256').update(String(header ?? '')).digest();
+  const b = crypto.createHash('sha256').update(expected).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+// if (!verify(rawBody, secret, req.headers['x-telegraph-signature'])) return res.status(401).end();
+```
+
+```python
+# Python receiver
+import hashlib, hmac
+def verify(raw: bytes, secret: str, header: str) -> bool:
+    expected = "sha256=" + hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, header or "")
+```
+
 Deliveries are SSRF-hardened (https only, private/loopback/link-local ranges refused, no redirects, hard timeout) and retried with backoff; a hook that keeps failing auto-disables so the relay never hammers a dead endpoint.
 
 ## The pattern, wherever you are

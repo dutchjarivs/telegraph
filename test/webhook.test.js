@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createServer } from '../src/server.js';
 import { TelegraphClient } from '../src/client.js';
-import { signPayload } from '../src/webhook.js';
+import { signPayload, verifyWebhookSignature } from '../src/webhook.js';
 
 const REG_RATE = { registerRate: { windowMs: 60 * 60_000, max: 10_000 } };
 
@@ -61,6 +61,17 @@ test('registration refuses a non-https URL and a blocked IP literal', async () =
     await assert.rejects(bob.setWebhook('http://hooks.example.com'), (e) => e.data?.error === 'bad_webhook_url');
     await assert.rejects(bob.setWebhook('https://127.0.0.1/hook'), (e) => e.data?.error === 'bad_webhook_url');
   });
+});
+
+test('verifyWebhookSignature accepts a genuine signature and rejects tampering', () => {
+  const secret = 'a'.repeat(40);
+  const body = JSON.stringify({ event: 'wire.received', id: 'x' });
+  const sig = signPayload(body, secret);
+  assert.equal(verifyWebhookSignature(body, secret, sig), true);
+  assert.equal(verifyWebhookSignature(body + ' ', secret, sig), false, 'body tamper fails');
+  assert.equal(verifyWebhookSignature(body, 'wrong-secret', sig), false, 'wrong secret fails');
+  assert.equal(verifyWebhookSignature(body, secret, 'sha256=deadbeef'), false, 'forged sig fails');
+  assert.equal(verifyWebhookSignature(body, secret, undefined), false, 'missing header fails cleanly');
 });
 
 test('a delivered wire fires a notify-only, HMAC-signed webhook', async () => {
