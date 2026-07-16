@@ -17,6 +17,18 @@
 export { TelegraphClient, MAX_WIRE_CHARS } from './src/client.js';
 export { TelegraphError, ERROR_CODES, explain } from './src/errors.js';
 
+// Wire-envelope (threading) helpers — threadId / replyTo / priority ride E2E
+// inside the sealed box, invisible to the relay. groupThreads() groups a set of
+// wires into conversations client-side.
+export {
+  packWire,
+  unpackWire,
+  groupThreads,
+  PRIORITIES,
+  WIRE_ENVELOPE_VERSION,
+  WIRE_ENVELOPE_CAPABILITY,
+} from './src/wire.js';
+
 export {
   generateIdentity,
   generateIdentity as createIdentity, // the name the docs lead with

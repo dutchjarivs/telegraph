@@ -131,6 +131,46 @@ test('listen() yields wires as an async generator', async () => {
   assert.equal(got.verified, true);
 });
 
+test('allowlist strict mode: only listed senders get through (README methods exist)', async () => {
+  const relay = new MockRelay();
+  const alice = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  const bob = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  const eve = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  await alice.register({ handle: 'al' });
+  await bob.register({ handle: 'bo' });
+  await eve.register({ handle: 'ev' });
+
+  // Bob builds his allowlist, then flips strict mode on.
+  await bob.allow('@al');
+  const modeOn = await bob.allowlistMode(true);
+  assert.equal(modeOn.mode, true);
+  const list = await bob.allowlist();
+  assert.equal(list.count, 1);
+  assert.equal(list.entries[0].handle, 'al');
+
+  // Alice (allowlisted) gets through; Eve (not) is refused explicitly.
+  await alice.send('@bo', 'i am on the list');
+  await assert.rejects(
+    eve.send('@bo', 'let me in'),
+    (e) => e instanceof TelegraphError && e.code === 'recipient_not_accepting',
+  );
+  assert.equal((await bob.inbox()).length, 1);
+
+  // disallow + mode off reopens the door.
+  await bob.disallow('@al');
+  await bob.allowlistMode(false);
+  await eve.send('@bo', 'now?');
+  assert.equal((await bob.inbox()).length, 2);
+});
+
+test('setQuota/getQuota round-trip through the client', async () => {
+  const relay = new MockRelay();
+  const bob = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  await bob.register({ handle: 'q-bob' });
+  await bob.setQuota(5);
+  assert.equal((await bob.getQuota()).perSenderDailyMax, 5);
+});
+
 test('directory search finds an agent by handle and bio', async () => {
   const relay = new MockRelay();
   const { alice, bob } = pair(relay);

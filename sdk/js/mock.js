@@ -37,6 +37,9 @@ export class MockRelay {
     this.mailboxes = new Map(); // address -> [wire]
     this.sent = new Map(); // address -> [sentCopy]
     this.blocks = new Map(); // blocker -> Set(blocked)
+    // recipient -> { mode: bool, entries: Map(address -> {note, at}) }
+    this.allowlists = new Map();
+    this.quotas = new Map(); // recipient -> perSenderDailyMax
     this.release = release;
     this.freeDailyTokens = freeDailyTokens;
     this.started = Date.now();
@@ -78,6 +81,12 @@ export class MockRelay {
     if (route === 'POST /v1/blocks') return this.#block(json, headers, rawBody);
     if (route === 'POST /v1/blocks/remove') return this.#unblock(json, headers, rawBody);
     if (route === 'GET /v1/blocks') return this.#listBlocks(headers);
+    if (route === 'POST /v1/allowlist') return this.#allow(json, headers, rawBody);
+    if (route === 'POST /v1/allowlist/remove') return this.#disallow(json, headers, rawBody);
+    if (route === 'POST /v1/allowlist/mode') return this.#allowMode(json, headers, rawBody);
+    if (route === 'GET /v1/allowlist') return this.#listAllow(headers);
+    if (route === 'POST /v1/quota') return this.#setQuota(json, headers, rawBody);
+    if (route === 'GET /v1/quota') return this.#getQuota(headers);
     return [404, { error: 'no_such_route' }];
   }
 
@@ -148,6 +157,11 @@ export class MockRelay {
     }
     if (this.blocks.get(to)?.has(from)) {
       return [403, { error: 'recipient_blocked_sender', hint: 'the recipient has blocked this address' }];
+    }
+    // Allowlist strict mode: when on, only listed senders (or self) get through.
+    const al = this.allowlists.get(to);
+    if (al?.mode && from !== to && !al.entries.has(from)) {
+      return [403, { error: 'recipient_not_accepting', hint: 'the recipient only accepts wires from allowlisted senders' }];
     }
     const id = wireId(sig);
     const mailbox = this.mailboxes.get(to) ?? [];
@@ -220,6 +234,72 @@ export class MockRelay {
     if (auth.error) return [auth.status, auth];
     const blocks = [...(this.blocks.get(auth.address) ?? [])].map((address) => ({ address }));
     return [200, { count: blocks.length, blocks }];
+  }
+
+  #getAllow(address) {
+    let a = this.allowlists.get(address);
+    if (!a) {
+      a = { mode: false, entries: new Map() };
+      this.allowlists.set(address, a);
+    }
+    return a;
+  }
+
+  #allow(body, headers, rawBody) {
+    const auth = this.#auth('POST', '/v1/allowlist', headers, rawBody);
+    if (auth.error) return [auth.status, auth];
+    if (!TG_ADDRESS_RE.test(body?.address ?? '')) return [400, { error: 'bad_address' }];
+    if (body.address === auth.address) return [400, { error: 'cannot_allowlist_self' }];
+    const a = this.#getAllow(auth.address);
+    a.entries.set(body.address, { note: body.note ?? '', at: Date.now() });
+    return [200, { ok: true, allowed: body.address, mode: a.mode, count: a.entries.size }];
+  }
+
+  #disallow(body, headers, rawBody) {
+    const auth = this.#auth('POST', '/v1/allowlist/remove', headers, rawBody);
+    if (auth.error) return [auth.status, auth];
+    const a = this.#getAllow(auth.address);
+    if (!a.entries.delete(body?.address)) return [404, { error: 'not_allowlisted' }];
+    return [200, { ok: true, removed: body.address, mode: a.mode, count: a.entries.size }];
+  }
+
+  #allowMode(body, headers, rawBody) {
+    const auth = this.#auth('POST', '/v1/allowlist/mode', headers, rawBody);
+    if (auth.error) return [auth.status, auth];
+    if (typeof body?.enabled !== 'boolean') return [400, { error: 'bad_mode' }];
+    const a = this.#getAllow(auth.address);
+    a.mode = body.enabled;
+    const warning = a.mode && a.entries.size === 0
+      ? 'allowlist mode is ON but the list is empty — you will accept wires from NO ONE'
+      : undefined;
+    return [200, { ok: true, mode: a.mode, count: a.entries.size, ...(warning ? { warning } : {}) }];
+  }
+
+  #listAllow(headers) {
+    const auth = this.#auth('GET', '/v1/allowlist', headers, '');
+    if (auth.error) return [auth.status, auth];
+    const a = this.#getAllow(auth.address);
+    const entries = [...a.entries.entries()].map(([address, e]) => ({
+      address, at: e.at, note: e.note, handle: this.agents.get(address)?.handle ?? null,
+    }));
+    return [200, { mode: a.mode, count: entries.length, entries }];
+  }
+
+  #setQuota(body, headers, rawBody) {
+    const auth = this.#auth('POST', '/v1/quota', headers, rawBody);
+    if (auth.error) return [auth.status, auth];
+    if (typeof body?.perSenderDailyMax !== 'number' || body.perSenderDailyMax < 0) {
+      return [400, { error: 'bad_quota' }];
+    }
+    const max = Math.floor(body.perSenderDailyMax);
+    this.quotas.set(auth.address, max);
+    return [200, { ok: true, perSenderDailyMax: max }];
+  }
+
+  #getQuota(headers) {
+    const auth = this.#auth('GET', '/v1/quota', headers, '');
+    if (auth.error) return [auth.status, auth];
+    return [200, { perSenderDailyMax: this.quotas.get(auth.address) ?? 0 }];
   }
 
   // Verifies a signed request the same way the real relay does: the address

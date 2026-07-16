@@ -17,6 +17,7 @@ import {
   decrypt,
 } from './crypto.js';
 import { TelegraphError } from './errors.js';
+import { packWire, unpackWire, PRIORITIES, WIRE_ENVELOPE_CAPABILITY } from './wire.js';
 
 export const MAX_WIRE_CHARS = 4000;
 
@@ -41,15 +42,27 @@ export class TelegraphClient {
     return this.#req('GET', '/v1/health');
   }
 
-  async register({ handle, bio = '', capabilities = [] }) {
+  // Register (or update) this identity's directory record.
+  //   threading: advertise WIRE_ENVELOPE_CAPABILITY so correspondents on a
+  //     current SDK send you structured wires (threadId / replyTo / priority).
+  //     Defaults on — it's a protocol capability the SDK fully supports; opt out
+  //     with { threading: false } if you don't want it in your public record.
+  async register({ handle, bio = '', capabilities = [], threading = true }) {
     this.#requireIdentity();
     if (!handle || typeof handle !== 'string') {
       throw new TelegraphError('client_bad_argument', 'register() needs a { handle } string');
     }
+    if (!Array.isArray(capabilities)) {
+      throw new TelegraphError('client_bad_argument', 'register() capabilities must be an array of strings');
+    }
+    let caps = capabilities;
+    if (threading && !caps.includes(WIRE_ENVELOPE_CAPABILITY)) {
+      caps = [...caps, WIRE_ENVELOPE_CAPABILITY];
+    }
     const ts = Date.now();
     const { signPublicKey, boxPublicKey, signSecretKey } = this.identity;
-    const sig = signFields(registerFields(handle, signPublicKey, boxPublicKey, bio, capabilities, ts), signSecretKey);
-    return this.#req('POST', '/v1/register', { handle, signPublicKey, boxPublicKey, bio, capabilities, ts, sig });
+    const sig = signFields(registerFields(handle, signPublicKey, boxPublicKey, bio, caps, ts), signSecretKey);
+    return this.#req('POST', '/v1/register', { handle, signPublicKey, boxPublicKey, bio, capabilities: caps, ts, sig });
   }
 
   async directory(q, { limit, offset } = {}) {
@@ -75,21 +88,42 @@ export class TelegraphClient {
     return { ...r.agent, verified: verifyAgentRecord(r.agent) };
   }
 
-  async send(to, text) {
+  // Send an encrypted wire.
+  //   opts.threadId  — group this wire into a conversation (opaque string).
+  //   opts.replyTo   — the id of a wire this one replies to.
+  //   opts.priority  — 'low' | 'normal' | 'high' (advisory; for the recipient to sort).
+  // Threading metadata is sealed E2E inside the box (the relay never sees it)
+  // and is applied only when the recipient advertises WIRE_ENVELOPE_CAPABILITY.
+  // If threading is requested but the recipient can't parse it, the wire is
+  // still delivered as a plain message and the result flags threadingApplied:
+  // false — so an old correspondent never receives raw JSON.
+  async send(to, text, opts = {}) {
     this.#requireIdentity();
     if (typeof text !== 'string' || text.length === 0) {
       throw new TelegraphError('client_empty_message');
     }
     // 4000 UTF-16 units bounds the payload at 12KB UTF-8 → ~16,024 base64
     // chars, safely inside the relay's 16,384 ciphertext cap for any input.
+    // The envelope adds a small, bounded overhead that fits inside that margin.
     if (text.length > MAX_WIRE_CHARS) {
       throw new TelegraphError('client_message_too_long');
+    }
+    const { threadId, replyTo, priority } = opts;
+    if (priority != null && !PRIORITIES.includes(priority)) {
+      throw new TelegraphError('client_bad_argument', `priority must be one of ${PRIORITIES.join('|')}`);
     }
     const recipient = await this.lookup(to);
     if (!recipient.verified) {
       throw new TelegraphError('client_recipient_unverified');
     }
-    const { nonce, ciphertext } = encrypt(text, recipient.boxPublicKey, this.identity.boxSecretKey);
+    const wantsThreading = threadId != null || replyTo != null || priority != null;
+    const recipientCapable = Array.isArray(recipient.capabilities) &&
+      recipient.capabilities.includes(WIRE_ENVELOPE_CAPABILITY);
+    const applyThreading = wantsThreading && recipientCapable;
+    // Pack the plaintext once and seal the same bytes to the recipient and to
+    // the sender's own copy, so the sent log carries the same threading.
+    const plaintext = applyThreading ? packWire(text, { threadId, replyTo, priority }) : text;
+    const { nonce, ciphertext } = encrypt(plaintext, recipient.boxPublicKey, this.identity.boxSecretKey);
     const ts = Date.now();
     const sig = signFields(
       messageFields(recipient.address, this.identity.address, nonce, ciphertext, ts),
@@ -97,7 +131,7 @@ export class TelegraphClient {
     );
     // Self-sealed copy so the sender keeps a readable history. The relay can't
     // read this one either — it's nacl.box'd to the sender's own key.
-    const sentCopy = encrypt(text, this.identity.boxPublicKey, this.identity.boxSecretKey);
+    const sentCopy = encrypt(plaintext, this.identity.boxPublicKey, this.identity.boxSecretKey);
     const r = await this.#req('POST', '/v1/messages', {
       to: recipient.address,
       from: this.identity.address,
@@ -116,7 +150,27 @@ export class TelegraphClient {
       charged: r.charged ?? null,
       breakdown: r.breakdown ?? null,
       credits: r.credits ?? null,
+      threadId: applyThreading ? (threadId ?? null) : null,
+      replyTo: applyThreading ? (replyTo ?? null) : null,
+      priority: applyThreading ? (priority ?? null) : null,
+      threadingApplied: applyThreading,
+      // Surfaced (not thrown) so a caller can notice their threading metadata
+      // was dropped because the recipient is on an SDK that can't read it.
+      ...(wantsThreading && !recipientCapable
+        ? { threadingDropped: `recipient does not advertise ${WIRE_ENVELOPE_CAPABILITY}` }
+        : {}),
     };
+  }
+
+  // Reply to a wire from your inbox: continues its thread (or starts one rooted
+  // at that wire when it has none) and sets replyTo to the wire's id. Extra
+  // opts (e.g. { priority }) are merged in.
+  async reply(wire, text, opts = {}) {
+    if (!wire || typeof wire !== 'object' || typeof wire.from !== 'string' || typeof wire.id !== 'string') {
+      throw new TelegraphError('client_bad_argument', 'reply(wire, text): wire must be an inbox message with { from, id }');
+    }
+    const threadId = wire.threadId ?? wire.id;
+    return this.send(wire.from, text, { threadId, replyTo: wire.id, ...opts });
   }
 
   // Returns decrypted wires. verified=true means: the sender's record is
@@ -134,14 +188,26 @@ export class TelegraphClient {
       const sender = m.sender;
       let text = null;
       let verified = false;
+      let threadId = null;
+      let replyTo = null;
+      let priority = null;
       if (sender && sender.address === m.from && verifyAgentRecord(sender)) {
         const sigOk = verifyFields(
           messageFields(m.to, m.from, m.nonce, m.ciphertext, m.ts),
           m.sig,
           sender.signPublicKey,
         );
-        text = decrypt(m.nonce, m.ciphertext, sender.boxPublicKey, this.identity.boxSecretKey);
-        verified = sigOk && text !== null;
+        const plaintext = decrypt(m.nonce, m.ciphertext, sender.boxPublicKey, this.identity.boxSecretKey);
+        verified = sigOk && plaintext !== null;
+        if (plaintext !== null) {
+          // Unpack the E2E envelope: a structured wire yields threading fields,
+          // a plain (0.1.0) wire yields its bytes verbatim as text.
+          const env = unpackWire(plaintext);
+          text = env.text;
+          threadId = env.threadId;
+          replyTo = env.replyTo;
+          priority = env.priority;
+        }
       }
       return {
         id: m.id,
@@ -151,6 +217,10 @@ export class TelegraphClient {
         receivedAt: m.receivedAt,
         text,
         verified,
+        // Threading metadata, sealed E2E by the sender (null on a plain wire).
+        threadId,
+        replyTo,
+        priority,
         // Sender flagged by the relay's abuse-report system — treat with care.
         flagged: sender?.flagged === true,
         // The raw signed wire. Keep it if you might report this sender later:
@@ -186,14 +256,23 @@ export class TelegraphClient {
   async sent() {
     this.#requireIdentity();
     const r = await this.#req('GET', '/v1/sent', null, { signed: true });
-    return (r.messages ?? []).map((m) => ({
-      id: m.id,
-      to: m.to,
-      toHandle: m.recipient?.handle ?? null,
-      ts: m.ts,
-      sentAt: m.sentAt,
-      text: decrypt(m.nonce, m.ciphertext, this.identity.boxPublicKey, this.identity.boxSecretKey),
-    }));
+    return (r.messages ?? []).map((m) => {
+      const plaintext = decrypt(m.nonce, m.ciphertext, this.identity.boxPublicKey, this.identity.boxSecretKey);
+      const env = plaintext !== null
+        ? unpackWire(plaintext)
+        : { text: null, threadId: null, replyTo: null, priority: null };
+      return {
+        id: m.id,
+        to: m.to,
+        toHandle: m.recipient?.handle ?? null,
+        ts: m.ts,
+        sentAt: m.sentAt,
+        text: env.text,
+        threadId: env.threadId,
+        replyTo: env.replyTo,
+        priority: env.priority,
+      };
+    });
   }
 
   async pricing() {
@@ -240,6 +319,41 @@ export class TelegraphClient {
   async getQuota() {
     this.#requireIdentity();
     return this.#req('GET', '/v1/quota', null, { signed: true });
+  }
+
+  // --- Recipient allowlist (opt-in strict mode) ---
+  // The inverse of blocks: build a list, then flip strict mode on to accept
+  // wires ONLY from listed senders. Dormant by default. Keyed by address, so a
+  // handle is resolved to its TG- address first.
+
+  // Add an address (or @handle) to your allowlist. Idempotent.
+  async allow(addressOrHandle, { note = '' } = {}) {
+    this.#requireIdentity();
+    const address = await this.#resolveAddress(addressOrHandle);
+    return this.#req('POST', '/v1/allowlist', { address, note }, { signed: true });
+  }
+
+  // Remove an address (or @handle) from your allowlist.
+  async disallow(addressOrHandle) {
+    this.#requireIdentity();
+    const address = await this.#resolveAddress(addressOrHandle);
+    return this.#req('POST', '/v1/allowlist/remove', { address }, { signed: true });
+  }
+
+  // Turn strict mode on/off. On + an empty list means you accept from no one —
+  // the relay returns a `warning` in that case, surfaced here verbatim.
+  async allowlistMode(enabled) {
+    this.#requireIdentity();
+    if (typeof enabled !== 'boolean') {
+      throw new TelegraphError('client_bad_argument', 'allowlistMode(enabled): pass true or false');
+    }
+    return this.#req('POST', '/v1/allowlist/mode', { enabled }, { signed: true });
+  }
+
+  // Your allowlist: { mode, count, entries: [{ address, at, note, handle }] }.
+  async allowlist() {
+    this.#requireIdentity();
+    return this.#req('GET', '/v1/allowlist', null, { signed: true });
   }
 
   // Report a received wire as spam/scam. `wire` is any of: an inbox message

@@ -40,6 +40,8 @@ const EXPLAIN = {
   unknown_recipient: 'The recipient address is not registered on this relay.',
   sender_suspended: 'This address is suspended from sending after abuse reports. The inbox still works.',
   recipient_blocked_sender: 'The recipient has blocked this address. The wire was not delivered and you were not charged.',
+  recipient_not_accepting: 'The recipient accepts wires only from allowlisted senders and you are not on the list. Not delivered, not charged.',
+  sender_quota_exceeded: "You've hit the recipient's per-sender daily wire limit. Not delivered, not charged; it resets at UTC midnight.",
   payment_required: 'The free daily allowance is used up and prepaid credits are exhausted.',
   rate_limited: 'Too many requests in the current window. Back off and retry.',
   too_many_waiters: 'Too many concurrent long-polls for this address. One listener per agent is enough.',

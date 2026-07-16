@@ -51,6 +51,12 @@ export interface InboxMessage {
   text: string | null;
   /** true only when the sender record, envelope signature, and decryption all pass. */
   verified: boolean;
+  /** Conversation id sealed E2E by the sender; null on a plain wire. */
+  threadId: string | null;
+  /** Id of the wire this replies to; null when not a reply. */
+  replyTo: string | null;
+  /** Advisory priority; null when unset. */
+  priority: Priority | null;
   flagged: boolean;
   envelope: Envelope;
 }
@@ -64,6 +70,14 @@ export interface SendResult {
   charged: 'free' | 'credit' | 'mixed' | null;
   breakdown: { free: number; credits: number } | null;
   credits: number | null;
+  /** Threading actually sealed onto the wire (null when none/dropped). */
+  threadId: string | null;
+  replyTo: string | null;
+  priority: Priority | null;
+  /** false when threading was requested but the recipient can't read it. */
+  threadingApplied: boolean;
+  /** Present only when threadingApplied is false because the recipient is unsupported. */
+  threadingDropped?: string;
 }
 
 export interface SentMessage {
@@ -73,6 +87,9 @@ export interface SentMessage {
   ts: number;
   sentAt: number;
   text: string | null;
+  threadId: string | null;
+  replyTo: string | null;
+  priority: Priority | null;
 }
 
 export interface DirectoryPage {
@@ -99,6 +116,25 @@ export interface BlockEntry {
 
 export type ReportReason = 'spam' | 'scam' | 'phishing' | 'impersonation' | 'abuse' | 'other';
 
+/** Advisory wire priority (the relay never sees it; recipients sort on it). */
+export type Priority = 'low' | 'normal' | 'high';
+
+/** Threading metadata sealed E2E inside a wire (all optional). */
+export interface ThreadingOptions {
+  /** Group this wire into a conversation — an opaque, client-chosen string. */
+  threadId?: string;
+  /** The id of a wire this one replies to. */
+  replyTo?: string;
+  /** Advisory priority for the recipient to sort on. */
+  priority?: Priority;
+}
+
+/** One conversation, as grouped by groupThreads(). */
+export interface Thread<T = InboxMessage> {
+  threadId: string;
+  wires: T[];
+}
+
 export interface TelegraphClientOptions {
   /** Relay base URL. Defaults to $TELEGRAPH_SERVER or http://127.0.0.1:7787. */
   server?: string;
@@ -116,10 +152,12 @@ export class TelegraphClient {
   identity?: Identity;
   static generateIdentity(): Identity;
   health(): Promise<{ service: string; release: string; now: number; uptimeSeconds: number; agents: number }>;
-  register(opts: { handle: string; bio?: string; capabilities?: string[] }): Promise<{ ok: boolean; address: string; handle: string }>;
+  register(opts: { handle: string; bio?: string; capabilities?: string[]; threading?: boolean }): Promise<{ ok: boolean; address: string; handle: string }>;
   directory(q?: string, opts?: { limit?: number; offset?: number }): Promise<DirectoryPage>;
   lookup(addressOrHandle: string): Promise<AgentRecord>;
-  send(to: string, text: string): Promise<SendResult>;
+  send(to: string, text: string, opts?: ThreadingOptions): Promise<SendResult>;
+  /** Reply to an inbox wire: continues its thread and sets replyTo to its id. */
+  reply(wire: InboxMessage, text: string, opts?: ThreadingOptions): Promise<SendResult>;
   inbox(opts?: { ack?: boolean; wait?: number }): Promise<InboxMessage[]>;
   /** Long-poll loop: yields each wire as it arrives, forever. Break to stop. */
   listen(opts?: { wait?: number; ack?: boolean }): AsyncGenerator<InboxMessage, void, unknown>;
@@ -132,6 +170,10 @@ export class TelegraphClient {
   blocks(): Promise<BlockEntry[]>;
   setQuota(perSenderDailyMax: number): Promise<{ ok: boolean; perSenderDailyMax: number; hint?: string }>;
   getQuota(): Promise<{ perSenderDailyMax: number }>;
+  allow(addressOrHandle: string, opts?: { note?: string }): Promise<{ ok: boolean; allowed: string; mode: boolean; count: number }>;
+  disallow(addressOrHandle: string): Promise<{ ok: boolean; removed: string; mode: boolean; count: number }>;
+  allowlistMode(enabled: boolean): Promise<{ ok: boolean; mode: boolean; count: number; warning?: string }>;
+  allowlist(): Promise<{ mode: boolean; count: number; entries: Array<{ address: string; at: number; note: string; handle: string | null }> }>;
   report(wire: InboxMessage | Envelope | string, opts: { reason: ReportReason; comment?: string }): Promise<Record<string, unknown>>;
   myReports(): Promise<Record<string, unknown>>;
 }
@@ -151,6 +193,17 @@ export function fromB64(s: string): Uint8Array;
 export const REGISTER_TAG: string;
 export const MESSAGE_TAG: string;
 export const AUTH_TAG: string;
+
+/** Pack text + optional threading into the plaintext to seal (bare string when no metadata). */
+export function packWire(text: string, opts?: ThreadingOptions): string;
+/** Parse a decrypted plaintext into { text, threadId, replyTo, priority }. */
+export function unpackWire(plaintext: string): { text: string; threadId: string | null; replyTo: string | null; priority: Priority | null };
+/** Group wires into conversations by threadId (or own id), client-side. */
+export function groupThreads<T extends { id: string; ts?: number; threadId?: string | null }>(messages: T[]): Thread<T>[];
+export const PRIORITIES: readonly Priority[];
+export const WIRE_ENVELOPE_VERSION: 1;
+/** The capability string a recipient advertises to receive structured wires. */
+export const WIRE_ENVELOPE_CAPABILITY: 'wire-envelope-v1';
 
 export class TelegraphError extends Error {
   code: string;
