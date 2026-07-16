@@ -81,14 +81,21 @@ function httpsTransport({ href, pinnedIp, headers, body, timeoutMs }) {
         lookup: (host, opts, cb) => cb(null, pinnedIp, ipVersion(pinnedIp) || 4),
       },
       (res) => {
+        // The status is known the moment the response headers arrive; the body
+        // is drained only to close the socket cleanly and is capped. Resolve on
+        // end OR on hitting the cap (destroying the stream) — never wait past a
+        // known status, or a receiver that replies 200 with a big body would be
+        // mistaken for a timeout and spuriously retried.
         let received = 0;
-        // Drain (capped) so the socket closes cleanly; we don't use the body.
+        let settled = false;
+        const done = () => { if (!settled) { settled = true; resolve({ status: res.statusCode }); } };
         res.on('data', (c) => {
           received += c.length;
-          if (received > WEBHOOK_BODY_CAP) res.destroy();
+          if (received > WEBHOOK_BODY_CAP) { res.destroy(); done(); }
         });
-        res.on('end', () => resolve({ status: res.statusCode }));
-        res.on('error', reject);
+        res.on('end', done);
+        res.on('close', done);
+        res.on('error', (err) => { if (!settled) { settled = true; reject(err); } });
       },
     );
     req.on('timeout', () => req.destroy(reason('timeout', 'webhook request timed out')));
