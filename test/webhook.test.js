@@ -175,3 +175,22 @@ test('a duplicate wire does not fire a second webhook', async () => {
     assert.equal(calls.length, 1, 'only the first, real delivery notifies');
   });
 });
+
+test('webhook registration is rate-limited per address', async () => {
+  // Tight limit so the test is fast: 2 changes per address per hour.
+  await withServer({}, async ({ agent }) => {
+    // Override the webhookRate limit for this test by re-creating with a custom limits config.
+    // Since withServer doesn't accept custom limits beyond REG_RATE, we test against
+    // the default limit (10/hour) by firing 11 changes and expecting the 11th to fail.
+    const bob = await agent('wh-rl');
+    for (let i = 0; i < 10; i++) {
+      await bob.setWebhook(`https://hooks.example.com/${i}`);
+    }
+    // 11th change in the same window should be refused.
+    await assert.rejects(
+      bob.setWebhook('https://hooks.example.com/eleven'),
+      (e) => e.data?.error === 'webhook_rate_limited',
+      '11th webhook change in the window is rate-limited',
+    );
+  });
+});

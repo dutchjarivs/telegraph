@@ -51,6 +51,7 @@ export const DEFAULT_LIMITS = {
   reportRate: { windowMs: 24 * 60 * 60_000, max: 20 }, // abuse reports per reporter per day
   reportCommentChars: 500,
   idempotencyKeyChars: 128, // max length of a client-supplied idempotency key
+  webhookRate: { windowMs: 60 * 60_000, max: 10 }, // webhook register/remove changes per address per hour
   idempotencyLedgerCap: 256, // retained keys per sender (ring buffer, oldest roll off)
   idempotencyTtlMs: 24 * 60 * 60_000, // a key dedups retries for 24h, then expires
   maxBlocks: 1000, // addresses one agent can block (bounds the stored list)
@@ -218,6 +219,7 @@ export function createServer({
   const registerMap = new Map();
   const reportMap = new Map();
   const lookupMap = new Map();
+  const webhookMap = new Map();
   // Set once the relay sees a request it cannot attribute to a distinct client
   // (see clientsAreIndistinguishable). Surfaced to the operator so a silently
   // ineffective rate limit doesn't look like a working one.
@@ -401,6 +403,7 @@ export function createServer({
     [registerMap, LIMITS.registerRate.windowMs],
     [reportMap, LIMITS.reportRate.windowMs],
     [lookupMap, LIMITS.lookupRate.windowMs],
+    [webhookMap, LIMITS.webhookRate.windowMs],
   ];
   const sweepTimer = setInterval(() => {
     const now = Date.now();
@@ -1382,6 +1385,9 @@ export function createServer({
       const raw = await readRaw(req);
       const auth = checkAuth(req, url.pathname, sha256hex(raw));
       if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
+      if (!allowHit(webhookMap, auth.address, LIMITS.webhookRate)) {
+        return send(res, 429, { error: 'webhook_rate_limited', hint: `max ${LIMITS.webhookRate.max} webhook changes per address per ${Math.round(LIMITS.webhookRate.windowMs / 60_000)} min` });
+      }
       const body = parseJson(raw);
       if (!body) return send(res, 400, { error: 'bad_json' });
       const { url: hookUrl, secret } = body;
@@ -1441,6 +1447,9 @@ export function createServer({
       const raw = await readRaw(req);
       const auth = checkAuth(req, url.pathname, sha256hex(raw));
       if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
+      if (!allowHit(webhookMap, auth.address, LIMITS.webhookRate)) {
+        return send(res, 429, { error: 'webhook_rate_limited', hint: `max ${LIMITS.webhookRate.max} webhook changes per address per ${Math.round(LIMITS.webhookRate.windowMs / 60_000)} min` });
+      }
       const removed = store.removeWebhook(auth.address);
       if (!removed) return send(res, 404, { error: 'no_webhook', hint: 'nothing to remove' });
       return send(res, 200, { ok: true, removed: true });
