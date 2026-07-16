@@ -346,5 +346,48 @@ test('the backup survives a real gzip round trip through the filesystem', () => 
   }
 });
 
+test('the backup captures the newer data files and never carries webhook secrets', () => {
+  const dataDir = tmp('coverage');
+  try {
+    // A relay that has exercised every feature that writes to disk. The backup
+    // sees on-disk state; how it got there doesn't matter, so write it directly.
+    fs.writeFileSync(path.join(dataDir, 'agents.json'), '{"TG-A":{"handle":"a"}}');
+    fs.writeFileSync(path.join(dataDir, 'allowlist.json'), '{"TG-A":{"mode":true,"entries":{"TG-B":{"at":1,"note":""}}}}');
+    fs.writeFileSync(path.join(dataDir, 'quotas.json'), '{"TG-A":{"perSenderDailyMax":5}}');
+    fs.writeFileSync(path.join(dataDir, 'quota-counts.json'), '{"2026-07-15":{"TG-B":{"TG-A":2}}}');
+    fs.writeFileSync(path.join(dataDir, 'audit.json'), '[{"at":1,"action":"credits.grant","actor":"admin"}]');
+    fs.mkdirSync(path.join(dataDir, 'idempotency'), { recursive: true });
+    fs.writeFileSync(path.join(dataDir, 'idempotency', 'TG-B.json'), '{"k:abc":{"id":"x","at":1}}');
+    fs.mkdirSync(path.join(dataDir, 'receipts'), { recursive: true });
+    fs.writeFileSync(path.join(dataDir, 'receipts', 'TG-B.json'), '[{"messageId":"x","recipient":"TG-A"}]');
+    // A webhook registration carries a per-hook HMAC secret — must NOT be backed up.
+    fs.writeFileSync(path.join(dataDir, 'webhooks.json'), '{"TG-A":{"url":"https://x/h","secret":"WEBHOOK-SECRET-XYZ"}}');
+
+    const { snapshot } = createSnapshot(dataDir);
+    for (const f of ['allowlist.json', 'quotas.json', 'quota-counts.json', 'audit.json', 'idempotency/TG-B.json', 'receipts/TG-B.json']) {
+      assert.ok(Object.hasOwn(snapshot.files, f), `${f} is now captured (was silently dropped before)`);
+    }
+    assert.ok(!Object.hasOwn(snapshot.files, 'webhooks.json'), 'webhooks.json is excluded');
+    assert.ok(!JSON.stringify(snapshot).includes('WEBHOOK-SECRET-XYZ'), 'no webhook secret leaked into the backup');
+    assert.deepEqual(snapshot.excludedData, ['webhooks.json']);
+    assert.equal(verify(snapshot).ok, true);
+
+    // Round-trip into a fresh dir: every captured file returns byte-identical,
+    // and the excluded webhook file is not resurrected.
+    const out = tmp('coverage-out');
+    try {
+      restore(parse(serialize(snapshot)), out);
+      for (const f of ['allowlist.json', 'quotas.json', 'audit.json', 'idempotency/TG-B.json', 'receipts/TG-B.json']) {
+        assert.equal(fs.readFileSync(path.join(out, f), 'utf8'), fs.readFileSync(path.join(dataDir, f), 'utf8'), `${f} round-trips intact`);
+      }
+      assert.ok(!fs.existsSync(path.join(out, 'webhooks.json')), 'webhooks.json is not restored');
+    } finally {
+      fs.rmSync(out, { recursive: true, force: true });
+    }
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 // --- small helpers ----------------------------------------------------------
 const sha256 = (text) => createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex');

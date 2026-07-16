@@ -31,13 +31,32 @@ const TOP_LEVEL = [
   'reports.json',
   'moderation.json',
   'blocks.json',
+  // Spam controls and the operator audit trail are relay-owned data with no
+  // secrets in them — omitting them from a snapshot silently reverts users'
+  // allowlists/quotas on restore and loses the compliance log entirely.
+  'allowlist.json',
+  'quotas.json',
+  'quota-counts.json', // today's per-sender delivery counts (keeps quotas honest across a restore)
+  'audit.json',
 ];
+
+// Deliberately NOT backed up, even though it is in dataDir: `webhooks.json`
+// stores each agent's per-hook HMAC secret. The whole no-secrets-in-a-backup
+// stance (see EXCLUDED_SECRETS) is that a backup gets copied around, so it must
+// not carry anything that is a key. A webhook secret is a lesser key than the
+// admin token, but it is still one — so webhook registrations, like the admin
+// token, are re-established after a recovery rather than shipped in the file.
+// (This is moot until webhooks deploy; documented now so it isn't "fixed" later
+// by blindly adding the file.)
+export const NOT_BACKED_UP = ['webhooks.json'];
 
 // Per-address files live in these subdirectories. `.seen.json` lives in
 // mailboxes/ alongside the mailbox itself and is included: it's the replay
 // guard, and restoring mailboxes without it would reopen the window where an
-// old envelope can be re-delivered — and its sender re-charged.
-const SUBDIRS = ['mailboxes', 'sent'];
+// old envelope can be re-delivered — and its sender re-charged. `idempotency/`
+// (per-sender send-dedup ledgers) and `receipts/` (delivery receipts) are the
+// same class of per-address JSON and restore alongside the mailboxes they guard.
+const SUBDIRS = ['mailboxes', 'sent', 'idempotency', 'receipts'];
 
 // Never in a backup, by design:
 //   .env, .admin-token, .stripe-webhook-secret
@@ -160,6 +179,7 @@ export function createSnapshot(dataDir, { attempts = 5, now = () => new Date() }
         .reduce((n, f) => n + countArray(contents[f]), 0),
     },
     excludedSecrets: EXCLUDED_SECRETS,
+    excludedData: NOT_BACKED_UP, // relay-owned but omitted on purpose (carries per-hook secrets)
     sha256: digests,
     files: contents,
   };
@@ -306,6 +326,11 @@ Secrets are not in this backup, on purpose: .env, .admin-token and
 .stripe-webhook-secret never enter it. Backups get copied around; a backup
 carrying the admin token makes every copy a key to the relay. Keep those three
 in a password manager — they are small and they almost never change.
+
+Webhook registrations (webhooks.json) are also omitted: each carries a per-hook
+HMAC secret, and the same "a backup must not be a key" rule applies. After a
+recovery, agents re-register their webhooks (POST /v1/webhook) — a new secret is
+issued and push delivery resumes.
 
 A full recovery is therefore: restore this backup, put those three files back,
 then start the relay.
