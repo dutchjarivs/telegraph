@@ -96,30 +96,60 @@ function isBlockedV4(ip) {
 }
 
 function isBlockedV6(ip) {
-  // Normalize an IPv4-mapped/compatible tail (::ffff:127.0.0.1, ::127.0.0.1)
-  // back to the v4 check — these route to the embedded v4 address.
-  const m = ip.match(/(?:^|:)((?:\d{1,3}\.){3}\d{1,3})$/);
-  if (m) {
-    // ::ffff:x or ::x forms; classify by the embedded v4 (and by the v6 prefix).
-    if (isBlockedV4(m[1])) return true;
-    // A global v4 embedded in ::ffff: is still reachable as that v4 — allow only
-    // if the v4 is allowed (already checked). Fall through for other prefixes.
+  // Parse to eight 16-bit groups first, so classification is on numbers, not on
+  // the (many) string spellings of the same address — compressed, uncompressed,
+  // and IPv4-mapped in either dotted or hex form all normalize here. Anything
+  // that won't parse is refused (fail closed).
+  const g = v6Groups(ip);
+  if (!g) return true;
+  const allZeroHi = g[0] === 0 && g[1] === 0 && g[2] === 0 && g[3] === 0 && g[4] === 0;
+  // Unspecified ::
+  if (allZeroHi && g[5] === 0 && g[6] === 0 && g[7] === 0) return true;
+  // Loopback ::1
+  if (allZeroHi && g[5] === 0 && g[6] === 0 && g[7] === 1) return true;
+  // IPv4-mapped ::ffff:a.b.c.d — reachable as the embedded v4, so classify by it.
+  if (allZeroHi && g[5] === 0xffff) {
+    return isBlockedV4(`${g[6] >> 8}.${g[6] & 255}.${g[7] >> 8}.${g[7] & 255}`);
   }
-  if (ip === '::' || ip === '::0' || ip === '0:0:0:0:0:0:0:0') return true; // unspecified
-  if (ip === '::1') return true; // loopback
-  const head = ip.split(':')[0];
-  const h = head === '' ? 0 : parseInt(head, 16);
-  // fe80::/10 link-local
-  if ((h & 0xffc0) === 0xfe80) return true;
-  // fc00::/7 unique-local (fc00/fd00)
-  if ((h & 0xfe00) === 0xfc00) return true;
-  // ff00::/8 multicast
-  if ((h & 0xff00) === 0xff00) return true;
-  // 2001:db8::/32 documentation
-  if (ip.startsWith('2001:db8:') || ip.startsWith('2001:0db8:')) return true;
-  // ::ffff:0:0/96 mapped without an embedded dotted-quad already handled above;
-  // a bare ::/96 compatible address with no v4 tail is effectively unspecified.
+  // IPv4-compatible ::a.b.c.d (deprecated) — same treatment.
+  if (allZeroHi && g[5] === 0 && (g[6] || g[7])) {
+    return isBlockedV4(`${g[6] >> 8}.${g[6] & 255}.${g[7] >> 8}.${g[7] & 255}`);
+  }
+  if ((g[0] & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+  if ((g[0] & 0xfe00) === 0xfc00) return true; // fc00::/7 unique-local
+  if ((g[0] & 0xff00) === 0xff00) return true; // ff00::/8 multicast
+  if (g[0] === 0x2001 && g[1] === 0x0db8) return true; // 2001:db8::/32 documentation
   return false;
+}
+
+// Parse an IPv6 literal into eight 16-bit integer groups, or null if malformed.
+// Handles :: compression and an embedded dotted-quad IPv4 tail.
+function v6Groups(ip) {
+  let str = ip;
+  const m = str.match(/:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (m) {
+    const o = m[1].split('.').map(Number);
+    if (o.some((x) => !Number.isInteger(x) || x < 0 || x > 255)) return null;
+    const g1 = ((o[0] << 8) | o[1]).toString(16);
+    const g2 = ((o[2] << 8) | o[3]).toString(16);
+    str = str.slice(0, str.length - m[1].length) + `${g1}:${g2}`;
+  }
+  const halves = str.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 ? (halves[1] ? halves[1].split(':') : []) : null;
+  let parts;
+  if (tail === null) {
+    parts = head;
+  } else {
+    const fill = 8 - head.length - tail.length;
+    if (fill < 0) return null;
+    parts = [...head, ...Array(fill).fill('0'), ...tail];
+  }
+  if (parts.length !== 8) return null;
+  const nums = parts.map((p) => (p === '' ? NaN : parseInt(p, 16)));
+  if (nums.some((n) => !Number.isInteger(n) || n < 0 || n > 0xffff) || !/^[0-9a-f:.]+$/i.test(ip)) return null;
+  return nums;
 }
 
 function reason(code, message) {

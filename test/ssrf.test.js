@@ -50,6 +50,24 @@ test('allows a public IPv6', () => {
   assert.equal(isBlockedIp('::ffff:8.8.8.8'), false);       // mapped public v4
 });
 
+test('blocks non-canonical IPv6 spellings (the SSRF-bypass class)', () => {
+  for (const ip of [
+    '0:0:0:0:0:0:0:1',                          // uncompressed loopback
+    '0000:0000:0000:0000:0000:0000:0000:0000',  // uncompressed unspecified
+    '::ffff:c0a8:0101',                         // hex-form mapped 192.168.1.1
+    '::ffff:0a00:0001',                         // hex-form mapped 10.0.0.1
+    '::ffff:a9fe:a9fe',                         // hex-form mapped 169.254.169.254 (metadata)
+    'fe80:0:0:0:0:0:0:1',                       // uncompressed link-local
+    '2001:0db8:0000:0000:0000:0000:0000:0001',  // uncompressed documentation
+    '::7f00:1',                                 // IPv4-compatible 127.0.0.1
+    ':::',                                       // malformed → fail closed
+  ]) {
+    assert.equal(isBlockedIp(ip), true, `${ip} should be blocked`);
+  }
+  // …but a hex-form mapped PUBLIC v4 is still allowed.
+  assert.equal(isBlockedIp('::ffff:0808:0808'), false); // 8.8.8.8
+});
+
 test('a non-IP string is treated as blocked (fail closed)', () => {
   assert.equal(isBlockedIp('not-an-ip'), true);
   assert.equal(isBlockedIp(''), true);
