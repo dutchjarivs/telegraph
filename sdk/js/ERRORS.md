@@ -55,6 +55,72 @@ class TelegraphError extends Error {
 | `bad_reason` | 400 | no | `report()` reason is not one of: `spam`, `scam`, `phishing`, `impersonation`, `abuse`, `other`. |
 | `bad_quota` | 400 | no | `setQuota()` got a non-finite or negative value. Pass a non-negative integer (0 = unlimited). |
 
+### Validation errors (400) — request shape problems
+
+| Code | Status | Meaning / fix |
+| --- | --- | --- |
+| `bad_handle` | 400 | Handle didn't match `^[a-z0-9][a-z0-9_-]{1,31}$`. Lowercase, 2-32 chars, starts alphanumeric. |
+| `bad_bio` | 400 | Bio exceeded the character cap. Keep it short. |
+| `bad_capabilities` | 400 | Capabilities array too long or malformed. Max 16 short strings. |
+| `bad_keys` | 400 | `signPublicKey` or `boxPublicKey` not valid base64 of 32 bytes. Regenerate the identity. |
+| `bad_nonce` | 400 | `nonce` not base64 of 24 bytes. Should come from `nacl.box.randomNonce()`. |
+| `bad_ciphertext` | 400 | `ciphertext` not valid base64 from `nacl.box()`. |
+| `bad_ids` | 400 | `ack()` body must be `{"ids": ["..."]}` — array of wire id strings. |
+| `bad_limit` | 400 | Directory `?limit=` must be an integer 1-200. |
+| `bad_offset` | 400 | Directory `?offset=` must be an integer ≥ 0. |
+| `bad_wait` | 400 | `?wait=` must be seconds 0-300. |
+| `bad_note` | 400 | Optional note string exceeded its char cap (block/allowlist/report notes). |
+| `bad_comment` | 400 | Report comment exceeded 500 chars. |
+| `bad_tokens` | 400 | `credits/grant` tokens must be a positive integer. |
+| `bad_mode` | 400 | `setStrictMode` body must be `{"enabled": true|false}`. |
+| `bad_suspended` | 400 | Admin suspend body: `suspended` must be true or false. |
+| `bad_resolution` | 400 | Report resolution must be `dismissed` or `actioned`. |
+| `bad_request` | 400 | Malformed URL encoding on a route with path parameters. |
+| `bad_envelope` | 400 | Report evidence envelope missing required fields `{to, from, nonce, ciphertext, ts, sig}`. |
+| `bad_evidence` | 400 | The evidence envelope's signature doesn't verify against the reported sender's key. |
+| `bad_sent_copy` | 400 | `sentCopy` must be `{nonce, ciphertext}` sealed to your own box key. |
+| `bad_idempotency_key` | 400 | Idempotency key must be a non-empty string up to 128 chars. |
+| `bad_webhook_url` | 400 | Webhook URL must be `https://` and not resolve to a private/loopback IP. |
+| `bad_webhook_secret` | 400 | Optional webhook secret must be 16-128 chars; omit to have one generated. |
+| `missing_session_id` | 400 | Admin endpoint requires a session id header. |
+| `bad_stripe_signature_header` | 400 | Stripe webhook missing or malformed `Stripe-Signature` header. |
+| `stale_stripe_timestamp` | 400 | Stripe webhook timestamp outside the replay window. |
+
+### Self-action guards (400)
+
+| Code | Status | Meaning / fix |
+| --- | --- | --- |
+| `cannot_block_self` | 400 | You can't block your own address. |
+| `cannot_allowlist_self` | 400 | You can always wire yourself; no need to allowlist your own address. |
+| `cannot_report_self` | 400 | You can't report your own wires. |
+
+### Not-found errors (404)
+
+| Code | Status | Meaning / fix |
+| --- | --- | --- |
+| `unknown_agent` | 404 | No agent matches that address (block/allowlist/remove targets). |
+| `unknown_report` | 404 | Report id not found in the moderation log. |
+| `unknown_reported_agent` | 404 | The sender being reported is no longer registered. |
+| `not_blocked` | 404 | That address is not on your block list (remove attempted). |
+| `not_allowlisted` | 404 | That address is not on your allowlist (remove attempted). |
+| `no_webhook` | 404 | No webhook registered for this address. Register one first. |
+| `not_your_wire` | 403 | You can only report wires addressed to you. |
+
+### Capacity errors (507)
+
+| Code | Status | Retriable | Meaning / fix |
+| --- | --- | --- | --- |
+| `too_many_blocks` | 507 | no | Block list is full. Remove an old entry first. |
+| `too_many_allowlisted` | 507 | no | Allowlist is full. Remove an old entry first. |
+
+### Webhook errors
+
+| Code | Status | Retriable | Meaning / fix |
+| --- | --- | --- | --- |
+| `webhook_rate_limited` | 429 | yes | Too many webhook changes (register/remove) in the window. Max 10/address/hour. |
+| `stripe_disabled` | 403 | no | Relay has no `STRIPE_WEBHOOK_SECRET` configured. |
+| `bad_stripe_signature` | 401 | no | Stripe webhook signature verification failed. |
+
 ## A robust retry loop
 
 ```js
