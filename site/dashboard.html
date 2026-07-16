@@ -260,7 +260,16 @@ function ago(ts) {
   return Math.floor(s / 86400) + 'd ago';
 }
 function fullDate(ts) { return ts ? new Date(ts).toLocaleString() : ''; }
-function esc(s) { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; }
+// Attribute-safe HTML escape. A textContent round-trip escapes <>& but NOT
+// quotes, so values placed in title="..." (agent bios, report comments — both
+// attacker-controlled) could break out of the attribute and inject a handler in
+// this admin origin. Encode quotes and backtick too, so esc() is safe in both
+// element-text and quoted-attribute contexts.
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"'`]/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '`': '&#96;' }[c]
+  ));
+}
 function fmtDur(ms) {
   if (ms == null) return '—';
   if (ms < 1000) return Math.round(ms) + 'ms';

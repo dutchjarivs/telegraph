@@ -413,7 +413,13 @@ function toast(msg, bad = false) {
   clearTimeout(t._h);
   t._h = setTimeout(() => { t.className = ''; }, 3500);
 }
-function esc(s) { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; }
+// Attribute-safe HTML escape (encodes quotes + backtick, not just <>&), so a
+// value is safe in both element-text and quoted-attribute contexts.
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"'`]/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '`': '&#96;' }[c]
+  ));
+}
 function full(n) { return (n ?? 0).toLocaleString('en-US'); }
 function when(ts) { return ts ? new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''; }
 
