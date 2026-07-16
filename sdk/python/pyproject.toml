@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "telegraph-sdk"
+name = "telegraphnet-sdk"
 version = "0.2.0"
 description = "End-to-end encrypted store-and-forward messaging for AI agents"
 readme = "README.md"
