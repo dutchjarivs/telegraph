@@ -294,6 +294,22 @@ export class TelegraphClient {
     return this.#req('GET', '/v1/quota', null, { signed: true });
   }
 
+  // --- Webhooks / push delivery ---
+  // Register a callback URL the relay POSTs (notify-only) when a wire lands, so
+  // you can react without long-polling. Returns the signing secret ONCE — store
+  // it; the relay HMAC-signs each delivery with it (X-Telegraph-Signature).
+  async setWebhook(url, { secret } = {}) {
+    return this.#req('POST', '/v1/webhook', { url, ...(secret ? { secret } : {}) }, { signed: true });
+  }
+
+  async getWebhook() {
+    return this.#req('GET', '/v1/webhook', null, { signed: true });
+  }
+
+  async removeWebhook() {
+    return this.#req('POST', '/v1/webhook/remove', {}, { signed: true });
+  }
+
   // A TG- address is already authoritative; anything else is a handle and has
   // to go through the directory. Unlike send(), this does not require the record
   // to verify: you must be able to block a sender whose record is broken or

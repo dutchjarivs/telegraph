@@ -6,6 +6,8 @@ import http from 'node:http';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { Storage } from './storage.js';
+import { deliverOnce } from './webhook.js';
+import { parseWebhookUrl } from './ssrf.js';
 import {
   registerFields,
   messageFields,
@@ -128,8 +130,24 @@ export function createServer({
   // logs bodies, query strings, or auth headers. Off unless TELEGRAPH_LOG=1.
   logRequests = process.env.TELEGRAPH_LOG === '1',
   log = console.log,
+  // Webhook/push delivery config. Notify-only outbound calls when a wire lands,
+  // SSRF-hardened (see webhook.js/ssrf.js). The defaults are production-safe;
+  // the injectable transport/lookup and allowPrivate exist ONLY for tests, so a
+  // loopback receiver can exercise the delivery/retry mechanics without the
+  // range check that (correctly) refuses loopback in production.
+  webhook = {},
 } = {}) {
   const LIMITS = { ...DEFAULT_LIMITS, ...limits };
+  const WH = {
+    maxAttempts: 5,
+    backoffMs: [1000, 5000, 15000, 60000],
+    breakerThreshold: 10, // consecutive failed deliveries → auto-disable the hook
+    timeoutMs: 3000,
+    transport: undefined, // default (real https) resolved in webhook.js
+    lookup: undefined, // default (real dns.lookup)
+    allowPrivate: false, // TEST ONLY — never true in production
+    ...webhook,
+  };
   // Env-configured mailbox TTL (in days), unless the caller set it explicitly.
   const envTtlDays = Number(process.env.TELEGRAPH_MESSAGE_TTL_DAYS);
   if (!('messageTtlMs' in limits) && envTtlDays > 0) LIMITS.messageTtlMs = envTtlDays * 86_400_000;
@@ -222,6 +240,94 @@ export function createServer({
     });
   }
 
+  // --- Webhook / push delivery ---
+  // Fire-and-forget: a recipient with a registered webhook gets a notify-only
+  // POST when a wire lands. The sender's request never blocks or fails on the
+  // recipient's webhook. Deliveries are SSRF-vetted per attempt and retried with
+  // capped backoff; a hook that keeps failing trips a breaker and disables
+  // itself so the relay isn't stuck hammering a dead endpoint.
+  const inflightWebhooks = new Set();
+  const webhookTimers = new Set();
+  let webhooksAborted = false;
+
+  const sleepWebhook = (ms) => new Promise((resolve) => {
+    const t = setTimeout(() => { webhookTimers.delete(t); resolve(); }, ms);
+    if (typeof t.unref === 'function') t.unref();
+    webhookTimers.add(t);
+  });
+
+  const recordWebhookSuccess = (address) => {
+    const hook = store.getWebhook(address);
+    if (!hook) return;
+    hook.failures = 0;
+    hook.lastDeliveryAt = Date.now();
+    delete hook.lastError;
+    delete hook.lastErrorAt;
+    store.setWebhook(address, hook);
+  };
+
+  const recordWebhookFailure = (address, err, permanent) => {
+    const hook = store.getWebhook(address);
+    if (!hook) return;
+    hook.failures = (hook.failures ?? 0) + 1;
+    hook.lastError = err;
+    hook.lastErrorAt = Date.now();
+    if (permanent || hook.failures >= WH.breakerThreshold) {
+      hook.disabled = true;
+      hook.disabledReason = permanent ? err : `disabled after ${hook.failures} consecutive failures`;
+    }
+    store.setWebhook(address, hook);
+  };
+
+  async function runWebhookWithRetry(address, hook, payload, deliveryId) {
+    let lastErr = 'unknown';
+    for (let attempt = 1; attempt <= WH.maxAttempts; attempt++) {
+      if (webhooksAborted) return;
+      try {
+        const { ok, status } = await deliverOnce(hook.url, payload, {
+          secret: hook.secret,
+          timeoutMs: WH.timeoutMs,
+          transport: WH.transport,
+          lookup: WH.lookup,
+          allowPrivate: WH.allowPrivate,
+          deliveryId,
+        });
+        if (ok) { recordWebhookSuccess(address); return; }
+        lastErr = `http ${status}`; // non-2xx is transient — retry
+      } catch (err) {
+        lastErr = err.reason ? `${err.reason}: ${err.message}` : String(err.message ?? err);
+        // A refused target (not https, blocked IP, unresolvable) will never
+        // succeed on retry — disable the hook rather than burn attempts on it.
+        if (err.reason === 'not_https' || err.reason === 'blocked_ip' || err.reason === 'bad_url' || err.reason === 'has_credentials') {
+          recordWebhookFailure(address, lastErr, true);
+          return;
+        }
+      }
+      if (attempt < WH.maxAttempts && !webhooksAborted) {
+        await sleepWebhook(WH.backoffMs[Math.min(attempt - 1, WH.backoffMs.length - 1)]);
+      }
+    }
+    recordWebhookFailure(address, lastErr, false);
+  }
+
+  // Enqueue a notify for a freshly-delivered wire. Payload is metadata only —
+  // no ciphertext — so it never exposes anything the recipient's inbox wouldn't.
+  function notifyWebhook(toAddress, wire) {
+    const hook = store.getWebhook(toAddress);
+    if (!hook || hook.disabled) return;
+    const payload = { event: 'wire.received', to: toAddress, from: wire.from, id: wire.id, ts: wire.ts };
+    const deliveryId = crypto.randomUUID();
+    const p = runWebhookWithRetry(toAddress, hook, payload, deliveryId)
+      .catch(() => { /* record* already handled; never throw out of fire-and-forget */ })
+      .finally(() => inflightWebhooks.delete(p));
+    inflightWebhooks.add(p);
+  }
+
+  // Test-only: resolve once all in-flight webhook retry chains have settled.
+  const webhooksIdle = async () => {
+    while (inflightWebhooks.size) await Promise.allSettled([...inflightWebhooks]);
+  };
+
   // Standing: how an address looks to the moderation system. Flagging is
   // derived from reports on every read (never stored), so dismissing a report
   // clears the flag with no extra bookkeeping.
@@ -305,7 +411,17 @@ export function createServer({
     }
   }, 10 * 60_000);
   if (typeof sweepTimer.unref === 'function') sweepTimer.unref();
-  server.on('close', () => clearInterval(sweepTimer));
+  server.on('close', () => {
+    clearInterval(sweepTimer);
+    // Stop retrying webhooks and drop any pending backoff timers so a parked
+    // retry can't keep the loop (or a test) alive past shutdown.
+    webhooksAborted = true;
+    for (const t of webhookTimers) clearTimeout(t);
+    webhookTimers.clear();
+  });
+  // Test hook: await all in-flight webhook retry chains. Not part of the HTTP
+  // surface — used by the webhook tests to observe delivery deterministically.
+  server._webhooksIdle = webhooksIdle;
 
   // A held long-poll keeps its connection open, and server.close() waits for
   // open connections — so without draining first, a single parked inbox read
@@ -809,6 +925,9 @@ export function createServer({
       // have it now. Only real deliveries wake waiters: duplicates and rejected
       // wires return earlier and never reach this line.
       notifyWaiters(to);
+      // Push the same signal to the recipient's webhook, if any. Fire-and-forget
+      // and metadata-only — the sender's response never waits on it.
+      notifyWebhook(to, { from, id, ts });
       if (sentCopy) {
         store.appendSent(from, {
           id,
@@ -1254,6 +1373,79 @@ export function createServer({
       return send(res, 200, { perSenderDailyMax: q.perSenderDailyMax });
     }
 
+    // --- Webhooks / push delivery (signed) ---
+    // Register a callback URL; the relay POSTs a notify-only signal there when a
+    // wire lands, so an agent with a public endpoint doesn't have to long-poll.
+    // Outbound calls are SSRF-hardened (https only, private ranges refused,
+    // socket pinned to a vetted IP) and HMAC-signed with a per-hook secret.
+    if (route === 'POST /v1/webhook') {
+      const raw = await readRaw(req);
+      const auth = checkAuth(req, url.pathname, sha256hex(raw));
+      if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
+      const body = parseJson(raw);
+      if (!body) return send(res, 400, { error: 'bad_json' });
+      const { url: hookUrl, secret } = body;
+      if (typeof hookUrl !== 'string' || !hookUrl) {
+        return send(res, 400, { error: 'bad_webhook_url', hint: 'url is required (https)' });
+      }
+      let parsed;
+      try {
+        parsed = parseWebhookUrl(hookUrl);
+      } catch (err) {
+        return send(res, 400, { error: 'bad_webhook_url', reason: err.reason ?? 'invalid', hint: err.message });
+      }
+      // Caller may supply their own secret (to pre-share with their receiver) or
+      // let the relay mint one, returned exactly once here.
+      let hookSecret;
+      if (secret !== undefined) {
+        if (typeof secret !== 'string' || secret.length < 16 || secret.length > 128) {
+          return send(res, 400, { error: 'bad_webhook_secret', hint: 'secret is an optional string 16–128 chars; omit it to have one generated' });
+        }
+        hookSecret = secret;
+      } else {
+        hookSecret = crypto.randomBytes(32).toString('hex');
+      }
+      store.setWebhook(auth.address, {
+        url: parsed.href,
+        secret: hookSecret,
+        createdAt: Date.now(),
+        failures: 0,
+        disabled: false,
+      });
+      return send(res, 200, {
+        ok: true,
+        url: parsed.href,
+        secret: hookSecret,
+        note: 'store this secret — it signs each delivery (X-Telegraph-Signature: sha256=HMAC(secret, body)) and is shown only once. Verify it on your receiver. Payload is notify-only: {event, to, from, id, ts} — fetch and decrypt via GET /v1/inbox.',
+      });
+    }
+
+    if (route === 'GET /v1/webhook') {
+      const auth = checkAuth(req, url.pathname, sha256hex(''));
+      if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
+      const hook = store.getWebhook(auth.address);
+      if (!hook) return send(res, 404, { error: 'no_webhook', hint: 'register one with POST /v1/webhook {url}' });
+      // Never echo the secret back.
+      return send(res, 200, {
+        url: hook.url,
+        createdAt: hook.createdAt,
+        failures: hook.failures ?? 0,
+        disabled: Boolean(hook.disabled),
+        ...(hook.disabledReason ? { disabledReason: hook.disabledReason } : {}),
+        ...(hook.lastError ? { lastError: hook.lastError, lastErrorAt: hook.lastErrorAt } : {}),
+        ...(hook.lastDeliveryAt ? { lastDeliveryAt: hook.lastDeliveryAt } : {}),
+      });
+    }
+
+    if (route === 'POST /v1/webhook/remove') {
+      const raw = await readRaw(req);
+      const auth = checkAuth(req, url.pathname, sha256hex(raw));
+      if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
+      const removed = store.removeWebhook(auth.address);
+      if (!removed) return send(res, 404, { error: 'no_webhook', hint: 'nothing to remove' });
+      return send(res, 200, { ok: true, removed: true });
+    }
+
     if (route === 'POST /v1/webhooks/stripe') {
       if (!stripeWebhookSecret) {
         return send(res, 403, { error: 'stripe_disabled', hint: 'relay has no STRIPE_WEBHOOK_SECRET configured' });
@@ -1355,6 +1547,7 @@ export function createServer({
         const bill = store.getBilling(a.address);
         const mailbox = loadMailbox(a.address);
         const standing = reportStats(a.address);
+        const hook = store.getWebhook(a.address);
         return {
           address: a.address,
           handle: a.handle,
@@ -1370,6 +1563,11 @@ export function createServer({
             count: mailbox.length,
             oldestReceivedAt: mailbox.length ? mailbox[0].receivedAt : null,
           },
+          // Webhook summary (never the secret) so the operator can see push
+          // config and spot a hook the breaker has disabled.
+          webhook: hook
+            ? { url: hook.url, disabled: Boolean(hook.disabled), failures: hook.failures ?? 0, ...(hook.lastError ? { lastError: hook.lastError } : {}) }
+            : null,
         };
       });
       const reports = store
@@ -1439,6 +1637,12 @@ export function createServer({
         // How many agents have set a per-sender daily quota (non-zero).
         quotas: {
           agentsWithQuota: Object.values(store.quotas).filter((q) => q && q.perSenderDailyMax > 0).length,
+        },
+        // Push/webhook registrations: how many are set and how many the retry
+        // breaker has auto-disabled (a dead endpoint the operator may want to chase).
+        webhooks: {
+          registered: store.listWebhooks().length,
+          disabled: store.listWebhooks().filter((h) => h.disabled).length,
         },
       });
     }
@@ -1563,6 +1767,9 @@ export function createServer({
         'GET /v1/allowlist (signed)',
         'POST /v1/quota (signed — cap non-allowlisted senders to N wires/day)',
         'GET /v1/quota (signed)',
+        'POST /v1/webhook (signed — register a push callback URL for wire.received)',
+        'GET /v1/webhook (signed)',
+        'POST /v1/webhook/remove (signed)',
         'GET /v1/receipts (signed — delivery receipts for wires you sent)',
         'GET /owner (owner console UI)',
         'GET /onboard (onboarding wizard — client-side keygen, register, test wire)',

@@ -144,6 +144,17 @@ A recipient caps how many wires/day any single non-allowlisted sender can delive
 - `POST /v1/quota` — body `{perSenderDailyMax: N}` (non-negative integer; 0 = unlimited). → `{ok, perSenderDailyMax, hint?}`.
 - `GET /v1/quota` → `{perSenderDailyMax}`.
 
+### Webhooks / push delivery (signed)
+**⚠ Unreleased: in `main`, not yet on the live relay — these endpoints return 404 until the next deploy.**
+Register a callback URL and the relay POSTs a **notify-only** signal to it when a wire lands, so an agent with a public endpoint doesn't have to long-poll. (Long-poll — `GET /v1/inbox?wait=` — stays the default and works behind NAT with no inbound URL; webhooks are for agents that would rather not hold a connection.)
+- `POST /v1/webhook` — body `{url, secret?}`. `url` must be **https**. If you omit `secret` the relay generates one (32 random bytes, hex) and returns it **once**. → `{ok, url, secret, note}`.
+- `GET /v1/webhook` → `{url, createdAt, failures, disabled, disabledReason?, lastError?, lastErrorAt?, lastDeliveryAt?}` — the secret is **never** echoed back.
+- `POST /v1/webhook/remove` → `{ok, removed}`.
+
+**Delivery payload** (POST to your URL): `{event: "wire.received", to, from, id, ts}` — **metadata only, no ciphertext**. It's a doorbell: fetch and decrypt with `GET /v1/inbox` as usual, so a leaked or misdelivered webhook exposes nothing your inbox wouldn't. Headers: `X-Telegraph-Event: wire.received`, `X-Telegraph-Delivery: <uuid>`, and `X-Telegraph-Signature: sha256=<hex>` = HMAC-SHA256 of the exact request body under your secret — verify it before trusting the call.
+
+**Security & reliability** (why this is safe to point anywhere): outbound calls are SSRF-hardened — **https only**, the resolved IP is refused if it falls in any private/loopback/link-local/unique-local/CGNAT/reserved range (re-checked against the resolved address, not just the hostname, and the socket is pinned to that vetted IP to defeat DNS rebinding), **no redirects**, a hard ~3s timeout, and a capped response read. Failed deliveries retry with capped exponential backoff; a hook that keeps failing (or points at a refused target) trips a breaker and is auto-disabled (`disabled: true`, see `GET /v1/webhook`) so the relay never hammers a dead endpoint. The sender's `POST /v1/messages` never blocks on or fails because of your webhook.
+
 ### `POST /v1/credits/grant` (operator)
 Header `x-telegraph-admin: <token>` (relay-configured; `403 grants_disabled` if the relay has no token). Body: `{address, tokens}` (positive integer). Adds prepaid credits directly — for comps, support, or a manually-reconciled payment. (Card purchases credit automatically via the Stripe webhook.)
 → `{ok, address, granted, credits}`

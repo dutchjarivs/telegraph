@@ -92,6 +92,36 @@ export class Storage {
     this.audit = fs.existsSync(this.auditFile)
       ? JSON.parse(fs.readFileSync(this.auditFile, 'utf8'))
       : [];
+    // Webhook registrations: { address: {url, secret, createdAt, failures,
+    // lastError, lastErrorAt, lastDeliveryAt, disabled} }. Keyed by address
+    // (keypair) like blocks/allowlist, so it follows the identity. `secret` is
+    // the HMAC key the relay signs deliveries with — shown to the agent once at
+    // registration, then only ever used server-side (never returned again).
+    this.webhooksFile = path.join(dataDir, 'webhooks.json');
+    this.webhooks = fs.existsSync(this.webhooksFile)
+      ? JSON.parse(fs.readFileSync(this.webhooksFile, 'utf8'))
+      : {};
+  }
+
+  // --- Webhooks ---
+  getWebhook(address) {
+    return Object.hasOwn(this.webhooks, address) ? this.webhooks[address] : null;
+  }
+
+  setWebhook(address, hook) {
+    this.webhooks[address] = hook;
+    atomicWrite(this.webhooksFile, JSON.stringify(this.webhooks, null, 2));
+  }
+
+  removeWebhook(address) {
+    if (!Object.hasOwn(this.webhooks, address)) return false;
+    delete this.webhooks[address];
+    atomicWrite(this.webhooksFile, JSON.stringify(this.webhooks, null, 2));
+    return true;
+  }
+
+  listWebhooks() {
+    return Object.entries(this.webhooks).map(([address, h]) => ({ address, ...h }));
   }
 
   // Append an operator action. Capped as a ring buffer so the file can't grow
@@ -302,6 +332,11 @@ export class Storage {
     if (fs.existsSync(idem)) fs.rmSync(idem);
     const receipts = this.receiptsFile(address);
     if (fs.existsSync(receipts)) fs.rmSync(receipts);
+    // A removed agent's webhook must not keep firing (its mailbox is gone).
+    if (Object.hasOwn(this.webhooks, address)) {
+      delete this.webhooks[address];
+      atomicWrite(this.webhooksFile, JSON.stringify(this.webhooks, null, 2));
+    }
     return agent;
   }
 

@@ -37,6 +37,9 @@ const USAGE = {
     'telegraph allowlist [on|off]': 'show your allowlist, or turn strict mode on/off (on = accept wires only from allowlisted senders)',
     'telegraph quota [N]': 'show your per-sender daily quota, or set it (0 = unlimited; allowlisted senders are exempt)',
     'telegraph reports': 'reports you have filed, with review status',
+    'telegraph webhook set <https-url> [--secret S]': 'register a push callback: the relay POSTs {event,to,from,id,ts} (notify-only, HMAC-signed) when a wire lands',
+    'telegraph webhook get': 'show your webhook config and delivery health (secret never shown)',
+    'telegraph webhook remove': 'stop push delivery',
     'telegraph grant --address TG-... --tokens N': 'operator only: grant token credits (needs TELEGRAPH_ADMIN_TOKEN or --admin-token)',
     'telegraph admin-reports': 'operator only: every abuse report on the relay',
     'telegraph resolve --id REPORTID --resolution dismissed|actioned [--note TEXT]': 'operator only: close out a report',
@@ -276,6 +279,19 @@ async function main() {
     case 'reports': {
       const client = loadClient();
       return out(await client.myReports());
+    }
+    case 'webhook': {
+      // `webhook set <https-url> [--secret S]` | `webhook get` | `webhook remove`
+      const client = loadClient();
+      const sub = opts._[0];
+      if (sub === 'set') {
+        const url = opts._[1];
+        if (!url) throw new Error('usage: telegraph webhook set <https-url> [--secret S]');
+        return out(await client.setWebhook(String(url), opts.secret ? { secret: String(opts.secret) } : {}));
+      }
+      if (sub === 'remove') return out(await client.removeWebhook());
+      if (sub === 'get' || sub === undefined) return out(await client.getWebhook());
+      throw new Error('usage: telegraph webhook <set|get|remove>');
     }
     case 'admin-reports': {
       const adminToken = opts['admin-token'] ?? process.env.TELEGRAPH_ADMIN_TOKEN;
