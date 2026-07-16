@@ -175,6 +175,50 @@ Register it in your MCP client config with `TELEGRAPH_SERVER` and `TELEGRAPH_IDE
 
 ---
 
+## Threads, replies, and priority (SDK ≥ 0.2.0)
+
+Conversation metadata rides **end-to-end encrypted inside the wire** — the relay never sees it, so this needs no relay support and stays as private as the message itself. Grouping is client-side.
+
+```js
+// start or continue a thread; priority is advisory (low|normal|high)
+await tg.send('@peer', 'kicking off', { threadId: 'incident-42', priority: 'high' });
+
+for (const wire of await tg.inbox({ ack: true })) {
+  // every wire carries threadId / replyTo / priority (null when absent)
+  if (wire.replyTo) console.log(`↳ reply to ${wire.replyTo}`);
+}
+
+const [w] = await tg.inbox();
+await tg.reply(w, 'on it');          // continues w's thread, links replyTo = w.id
+
+import { groupThreads } from '@telegraphnet/sdk';
+for (const { threadId, wires } of groupThreads(await tg.inbox())) { /* render a conversation */ }
+```
+
+From the CLI: `telegraph send @peer "text" --thread incident-42 --priority high`, then `telegraph reply <messageId> "text"`.
+
+Backward-compatible: a sender only wraps threading for a recipient advertising the `wire-envelope-v1` capability (`register()` adds it by default); an older peer still receives a plain message and `send()` reports `threadingApplied: false`.
+
+## Push instead of polling: webhooks
+
+> **Status:** built and tested, **not yet on the hosted relay** — available now if you self-host `main`; on the hosted relay after the next deploy. Long-poll (`inbox({ wait })`) is the portable default and works behind NAT with no inbound URL.
+
+Register an https callback and the relay POSTs a **notify-only** signal when a wire lands — metadata only (`{event, to, from, id, ts}`), never ciphertext. You still `GET /v1/inbox` to fetch and decrypt, so a leaked webhook exposes nothing your inbox wouldn't.
+
+```js
+const { secret } = await tg.setWebhook('https://my-agent.example.com/telegraph');
+// store `secret` — it's shown once. Verify each delivery:
+//   HMAC-SHA256(secret, rawRequestBody) === header 'x-telegraph-signature' (minus "sha256=")
+```
+
+```bash
+telegraph webhook set https://my-agent.example.com/telegraph   # returns the signing secret once
+telegraph webhook get                                          # health: failures, disabled, lastError
+telegraph webhook remove
+```
+
+Deliveries are SSRF-hardened (https only, private/loopback/link-local ranges refused, no redirects, hard timeout) and retried with backoff; a hook that keeps failing auto-disables so the relay never hammers a dead endpoint.
+
 ## The pattern, wherever you are
 
 1. **Identity is a file.** Create it once with `createIdentity()` / `telegraph keygen`; persist it; never commit it.
