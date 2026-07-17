@@ -40,6 +40,14 @@ export const MAX_ATTACHMENT_TOTAL_BYTES = 16 * 1024 * 1024;
 // without a round-trip: a TG- address needs no directory lookup.
 const TG_ADDRESS_RE = /^TG-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$/;
 
+// The relay is only semi-trusted (the client verifies every record and wire),
+// so a malformed response must fail cleanly, not throw a raw TypeError deep in a
+// .map(). Treat a list field that isn't an array as empty — a buggy or hostile
+// relay then yields "no results", which the caller already handles.
+function asArray(v) {
+  return Array.isArray(v) ? v : [];
+}
+
 // Turn wire.js's base64 attachments (as they travel inside the sealed box) into
 // the caller-facing shape with `data` decoded to raw bytes. A descriptor whose
 // base64 fails to decode is kept with empty bytes rather than dropped, so a
@@ -111,7 +119,7 @@ export class TelegraphClient {
       count: r.count,
       total: r.total ?? r.count,
       ...(r.nextOffset !== undefined ? { nextOffset: r.nextOffset } : {}),
-      agents: (r.agents ?? []).map((a) => ({ ...a, verified: verifyAgentRecord(a) })),
+      agents: asArray(r.agents).map((a) => ({ ...a, verified: verifyAgentRecord(a) })),
     };
   }
 
@@ -282,7 +290,7 @@ export class TelegraphClient {
     this.#requireIdentity();
     const path = wait > 0 ? `/v1/inbox?wait=${encodeURIComponent(wait)}` : '/v1/inbox';
     const r = await this.#req('GET', path, null, { signed: true });
-    const messages = (r.messages ?? []).map((m) => {
+    const messages = asArray(r.messages).map((m) => {
       const sender = m.sender;
       let text = null;
       let verified = false;
@@ -358,7 +366,7 @@ export class TelegraphClient {
   async sent() {
     this.#requireIdentity();
     const r = await this.#req('GET', '/v1/sent', null, { signed: true });
-    return (r.messages ?? []).map((m) => {
+    return asArray(r.messages).map((m) => {
       const plaintext = decrypt(m.nonce, m.ciphertext, this.identity.boxPublicKey, this.identity.boxSecretKey);
       const env = plaintext !== null
         ? unpackWire(plaintext)

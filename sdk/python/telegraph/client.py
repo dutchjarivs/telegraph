@@ -61,6 +61,14 @@ def _encode_attachments(attachments: list) -> list[dict]:
     return out
 
 
+def _as_list(v) -> list:
+    """The relay is only semi-trusted (the client verifies every record and
+    wire), so a malformed response must fail cleanly, not iterate a string char
+    by char into an AttributeError. A list field that isn't a list is treated as
+    empty — a buggy or hostile relay then yields "no results"."""
+    return v if isinstance(v, list) else []
+
+
 def _decode_attachments(raw: list) -> list[dict]:
     """base64 wire attachments → caller bytes (``data`` decoded).
 
@@ -189,7 +197,7 @@ class TelegraphClient:
             params["offset"] = offset
         path = "/v1/directory" + (f"?{urllib.parse.urlencode(params)}" if params else "")
         r = self._req("GET", path)
-        agents = [{**a, "verified": crypto.verify_agent_record(a)} for a in r.get("agents", [])]
+        agents = [{**a, "verified": crypto.verify_agent_record(a)} for a in _as_list(r.get("agents"))]
         return {"count": r.get("count"), "total": r.get("total", r.get("count")), "agents": agents}
 
     def lookup(self, address_or_handle: str) -> dict:
@@ -319,7 +327,7 @@ class TelegraphClient:
         r = self._req("GET", path, signed=True, timeout=_http_timeout(wait))
 
         messages = []
-        for m in r.get("messages", []):
+        for m in _as_list(r.get("messages")):
             sender = m.get("sender")
             text, verified = None, False
             thread_id = reply_to = priority = None
@@ -395,7 +403,7 @@ class TelegraphClient:
     def sent(self) -> list[dict]:
         r = self._req("GET", "/v1/sent", signed=True)
         out = []
-        for m in r.get("messages", []):
+        for m in _as_list(r.get("messages")):
             plaintext = crypto.decrypt(
                 m["nonce"], m["ciphertext"], self.identity["boxPublicKey"], self.identity["boxSecretKey"]
             )

@@ -182,3 +182,21 @@ test('directory search finds an agent by handle and bio', async () => {
   assert.equal(byBio.count, 1);
   assert.equal(byBio.agents[0].verified, true);
 });
+
+test('a malformed relay response fails cleanly instead of throwing a TypeError', async () => {
+  // The relay is only semi-trusted. If it returns a list field that isn't an
+  // array (a bug, or a hostile relay), the SDK must not crash mid-.map() — it
+  // should behave as "no results", which callers already handle.
+  const identity = createIdentity();
+  const badFetch = async (url) => ({
+    ok: true,
+    status: 200,
+    json: async () => (String(url).includes('/v1/directory')
+      ? { count: 0, agents: 'not-an-array' }
+      : { messages: { not: 'an array' } }),
+  });
+  const client = new TelegraphClient({ identity, fetch: badFetch });
+  assert.deepEqual(await client.inbox(), []);
+  assert.deepEqual(await client.sent(), []);
+  assert.deepEqual((await client.directory('x')).agents, []);
+});

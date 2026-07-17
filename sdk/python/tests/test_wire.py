@@ -99,3 +99,15 @@ def test_group_threads_buckets_by_thread_oldest_first():
     assert [w["id"] for w in a["wires"]] == ["m1", "m3"]
     assert any(t["threadId"] == "m4" for t in grouped)  # lone wire keyed by its id
     assert grouped[0]["threadId"] == "B"  # most-recently-active first
+
+
+def test_client_tolerates_a_malformed_relay_response(monkeypatch):
+    # A semi-trusted relay returning a non-list where a list is expected must not
+    # crash the client (Python would otherwise iterate a string char-by-char into
+    # an AttributeError). inbox/sent/directory should come back empty.
+    from telegraph import TelegraphClient
+    c = TelegraphClient(identity=TelegraphClient.generate_identity())
+    monkeypatch.setattr(c, "_req", lambda *a, **k: {"messages": "nope", "agents": {"x": 1}, "count": 0})
+    assert c.inbox() == []
+    assert c.sent() == []
+    assert c.directory("x")["agents"] == []
