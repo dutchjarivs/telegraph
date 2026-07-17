@@ -15,15 +15,44 @@ import {
   verifyAgentRecord,
   encrypt,
   decrypt,
+  toB64,
+  fromB64,
 } from './crypto.js';
 import { TelegraphError } from './errors.js';
-import { packWire, unpackWire, PRIORITIES, WIRE_ENVELOPE_CAPABILITY } from './wire.js';
+import {
+  packWire,
+  unpackWire,
+  PRIORITIES,
+  WIRE_ENVELOPE_CAPABILITY,
+  ATTACHMENTS_CAPABILITY,
+  MAX_ATTACHMENTS,
+} from './wire.js';
 
 export const MAX_WIRE_CHARS = 4000;
+
+// Preflight ceiling on the raw bytes across all attachments in one wire. This is
+// a friendly early error, not the real limit — the relay's ciphertext cap is the
+// authority and a large wire also costs tokens under the standard meter, so a
+// send over the relay's cap still comes back as a clean `too_large`.
+export const MAX_ATTACHMENT_TOTAL_BYTES = 16 * 1024 * 1024;
 
 // Mirrors the relay's address grammar. Lets us tell an address from a handle
 // without a round-trip: a TG- address needs no directory lookup.
 const TG_ADDRESS_RE = /^TG-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$/;
+
+// Turn wire.js's base64 attachments (as they travel inside the sealed box) into
+// the caller-facing shape with `data` decoded to raw bytes. A descriptor whose
+// base64 fails to decode is kept with empty bytes rather than dropped, so a
+// caller still sees the name/mime and can tell the file arrived corrupt.
+function decodeAttachments(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map((a) => ({
+    name: a.name,
+    mime: a.mime,
+    size: a.size,
+    data: fromB64(a.data),
+  }));
+}
 
 export class TelegraphClient {
   constructor({ server = process.env.TELEGRAPH_SERVER ?? 'http://127.0.0.1:7787', identity, fetch: fetchImpl } = {}) {
@@ -47,7 +76,10 @@ export class TelegraphClient {
   //     current SDK send you structured wires (threadId / replyTo / priority).
   //     Defaults on — it's a protocol capability the SDK fully supports; opt out
   //     with { threading: false } if you don't want it in your public record.
-  async register({ handle, bio = '', capabilities = [], threading = true }) {
+  //   attachments: advertise ATTACHMENTS_CAPABILITY so correspondents may send
+  //     you files (sealed E2E inside the same box). Defaults on; opt out with
+  //     { attachments: false } to have senders refuse to attach files to you.
+  async register({ handle, bio = '', capabilities = [], threading = true, attachments = true }) {
     this.#requireIdentity();
     if (!handle || typeof handle !== 'string') {
       throw new TelegraphError('client_bad_argument', 'register() needs a { handle } string');
@@ -58,6 +90,9 @@ export class TelegraphClient {
     let caps = capabilities;
     if (threading && !caps.includes(WIRE_ENVELOPE_CAPABILITY)) {
       caps = [...caps, WIRE_ENVELOPE_CAPABILITY];
+    }
+    if (attachments && !caps.includes(ATTACHMENTS_CAPABILITY)) {
+      caps = [...caps, ATTACHMENTS_CAPABILITY];
     }
     const ts = Date.now();
     const { signPublicKey, boxPublicKey, signSecretKey } = this.identity;
@@ -99,30 +134,53 @@ export class TelegraphClient {
   // false — so an old correspondent never receives raw JSON.
   async send(to, text, opts = {}) {
     this.#requireIdentity();
-    if (typeof text !== 'string' || text.length === 0) {
+    if (typeof text !== 'string') {
+      throw new TelegraphError('client_bad_argument', 'send(to, text): text must be a string');
+    }
+    const { threadId, replyTo, priority, attachments } = opts;
+    const hasAttachments = attachments != null &&
+      (Array.isArray(attachments) ? attachments.length > 0 : true);
+    // A wire must carry *something* — text or at least one attachment.
+    if (text.length === 0 && !hasAttachments) {
       throw new TelegraphError('client_empty_message');
     }
-    // 4000 UTF-16 units bounds the payload at 12KB UTF-8 → ~16,024 base64
-    // chars, safely inside the relay's 16,384 ciphertext cap for any input.
-    // The envelope adds a small, bounded overhead that fits inside that margin.
+    // 4000 UTF-16 units bounds the text at 12KB UTF-8 → ~16,024 base64 chars,
+    // safely inside the relay's default 16,384 ciphertext cap. Attachment bytes
+    // are bounded separately (below) since they can legitimately be far larger.
     if (text.length > MAX_WIRE_CHARS) {
       throw new TelegraphError('client_message_too_long');
     }
-    const { threadId, replyTo, priority } = opts;
     if (priority != null && !PRIORITIES.includes(priority)) {
       throw new TelegraphError('client_bad_argument', `priority must be one of ${PRIORITIES.join('|')}`);
     }
+    // Encode attachments up front so a bad descriptor fails before any lookup.
+    const encodedAttachments = hasAttachments ? this.#encodeAttachments(attachments) : null;
     const recipient = await this.lookup(to);
     if (!recipient.verified) {
       throw new TelegraphError('client_recipient_unverified');
     }
+    const caps = Array.isArray(recipient.capabilities) ? recipient.capabilities : [];
+    // Attachments are content, not an advisory hint: dropping them silently would
+    // change the message. So refuse rather than send text-only if the recipient
+    // can't receive them.
+    if (hasAttachments && !caps.includes(ATTACHMENTS_CAPABILITY)) {
+      throw new TelegraphError(
+        'client_recipient_no_attachments',
+        `recipient does not advertise ${ATTACHMENTS_CAPABILITY}`,
+      );
+    }
     const wantsThreading = threadId != null || replyTo != null || priority != null;
-    const recipientCapable = Array.isArray(recipient.capabilities) &&
-      recipient.capabilities.includes(WIRE_ENVELOPE_CAPABILITY);
-    const applyThreading = wantsThreading && recipientCapable;
+    const applyThreading = wantsThreading && caps.includes(WIRE_ENVELOPE_CAPABILITY);
+    // Any structured content (threading or attachments) travels as an envelope;
+    // a plain text-only send with a bare-string recipient stays byte-for-byte
+    // identical to 0.1.0.
+    const structured = applyThreading || hasAttachments;
+    const wireOpts = {};
+    if (applyThreading) Object.assign(wireOpts, { threadId, replyTo, priority });
+    if (hasAttachments) wireOpts.attachments = encodedAttachments;
     // Pack the plaintext once and seal the same bytes to the recipient and to
-    // the sender's own copy, so the sent log carries the same threading.
-    const plaintext = applyThreading ? packWire(text, { threadId, replyTo, priority }) : text;
+    // the sender's own copy, so the sent log carries the same threading/files.
+    const plaintext = structured ? packWire(text, wireOpts) : text;
     const { nonce, ciphertext } = encrypt(plaintext, recipient.boxPublicKey, this.identity.boxSecretKey);
     const ts = Date.now();
     const sig = signFields(
@@ -154,12 +212,52 @@ export class TelegraphClient {
       replyTo: applyThreading ? (replyTo ?? null) : null,
       priority: applyThreading ? (priority ?? null) : null,
       threadingApplied: applyThreading,
+      // How many attachments actually rode this wire (0 for a plain message).
+      attachments: hasAttachments ? encodedAttachments.length : 0,
       // Surfaced (not thrown) so a caller can notice their threading metadata
       // was dropped because the recipient is on an SDK that can't read it.
-      ...(wantsThreading && !recipientCapable
+      ...(wantsThreading && !applyThreading
         ? { threadingDropped: `recipient does not advertise ${WIRE_ENVELOPE_CAPABILITY}` }
         : {}),
     };
+  }
+
+  // Validate and base64-encode caller attachments into the on-wire shape.
+  // Accepts [{ name?, mime?, data }] where data is a Uint8Array/Buffer (the raw
+  // bytes) — this is where the SDK turns bytes the caller holds into the base64
+  // strings wire.js embeds in the sealed envelope.
+  #encodeAttachments(attachments) {
+    if (!Array.isArray(attachments)) {
+      throw new TelegraphError('client_bad_argument', 'attachments must be an array');
+    }
+    if (attachments.length > MAX_ATTACHMENTS) {
+      throw new TelegraphError('client_bad_argument', `at most ${MAX_ATTACHMENTS} attachments per wire`);
+    }
+    let total = 0;
+    const out = attachments.map((a, i) => {
+      if (!a || typeof a !== 'object') {
+        throw new TelegraphError('client_bad_argument', `attachment ${i} must be an object`);
+      }
+      const bytes = a.data;
+      const isBytes = bytes instanceof Uint8Array || Buffer.isBuffer(bytes);
+      if (!isBytes) {
+        throw new TelegraphError('client_bad_argument', `attachment ${i} data must be a Uint8Array or Buffer`);
+      }
+      total += bytes.length;
+      return {
+        name: a.name == null ? undefined : String(a.name),
+        mime: a.mime == null ? undefined : String(a.mime),
+        size: bytes.length,
+        data: toB64(bytes),
+      };
+    });
+    if (total > MAX_ATTACHMENT_TOTAL_BYTES) {
+      throw new TelegraphError(
+        'client_attachment_too_large',
+        `attachments total ${total} bytes exceeds the ${MAX_ATTACHMENT_TOTAL_BYTES}-byte client limit`,
+      );
+    }
+    return out;
   }
 
   // Reply to a wire from your inbox: continues its thread (or starts one rooted
@@ -191,6 +289,7 @@ export class TelegraphClient {
       let threadId = null;
       let replyTo = null;
       let priority = null;
+      let attachments = [];
       if (sender && sender.address === m.from && verifyAgentRecord(sender)) {
         const sigOk = verifyFields(
           messageFields(m.to, m.from, m.nonce, m.ciphertext, m.ts),
@@ -200,13 +299,14 @@ export class TelegraphClient {
         const plaintext = decrypt(m.nonce, m.ciphertext, sender.boxPublicKey, this.identity.boxSecretKey);
         verified = sigOk && plaintext !== null;
         if (plaintext !== null) {
-          // Unpack the E2E envelope: a structured wire yields threading fields,
-          // a plain (0.1.0) wire yields its bytes verbatim as text.
+          // Unpack the E2E envelope: a structured wire yields threading fields
+          // and attachments, a plain (0.1.0) wire yields its bytes as text.
           const env = unpackWire(plaintext);
           text = env.text;
           threadId = env.threadId;
           replyTo = env.replyTo;
           priority = env.priority;
+          attachments = decodeAttachments(env.attachments);
         }
       }
       return {
@@ -217,6 +317,8 @@ export class TelegraphClient {
         receivedAt: m.receivedAt,
         text,
         verified,
+        // Decrypted attachments (empty on a plain wire): [{ name, mime, size, data:Uint8Array }].
+        attachments,
         // Threading metadata, sealed E2E by the sender (null on a plain wire).
         threadId,
         replyTo,
@@ -260,7 +362,7 @@ export class TelegraphClient {
       const plaintext = decrypt(m.nonce, m.ciphertext, this.identity.boxPublicKey, this.identity.boxSecretKey);
       const env = plaintext !== null
         ? unpackWire(plaintext)
-        : { text: null, threadId: null, replyTo: null, priority: null };
+        : { text: null, threadId: null, replyTo: null, priority: null, attachments: [] };
       return {
         id: m.id,
         to: m.to,
@@ -271,6 +373,7 @@ export class TelegraphClient {
         threadId: env.threadId,
         replyTo: env.replyTo,
         priority: env.priority,
+        attachments: decodeAttachments(env.attachments),
       };
     });
   }

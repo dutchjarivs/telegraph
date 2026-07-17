@@ -37,15 +37,15 @@ test('packWire rejects an unknown priority', () => {
 
 test('unpackWire round-trips an envelope and reads a bare string as text', () => {
   const round = unpackWire(packWire('yo', { threadId: 'T', replyTo: 'R', priority: 'low' }));
-  assert.deepEqual(round, { text: 'yo', threadId: 'T', replyTo: 'R', priority: 'low' });
+  assert.deepEqual(round, { text: 'yo', threadId: 'T', replyTo: 'R', priority: 'low', attachments: [] });
 
-  assert.deepEqual(unpackWire('just text'), { text: 'just text', threadId: null, replyTo: null, priority: null });
+  assert.deepEqual(unpackWire('just text'), { text: 'just text', threadId: null, replyTo: null, priority: null, attachments: [] });
 });
 
 test('unpackWire never mistakes ordinary JSON for an envelope (no _tgv marker)', () => {
   // Real message content that is itself JSON must come back byte-for-byte.
   const literal = '{"v":1,"text":"this is my actual message"}';
-  assert.deepEqual(unpackWire(literal), { text: literal, threadId: null, replyTo: null, priority: null });
+  assert.deepEqual(unpackWire(literal), { text: literal, threadId: null, replyTo: null, priority: null, attachments: [] });
   // Malformed JSON is text, not an error.
   assert.equal(unpackWire('{not json').text, '{not json');
   // Marker present but text missing → not a valid envelope, treated as text.

@@ -6,7 +6,8 @@
 // field (e.g. `payment_required`, `recipient_blocked_sender`), and client-side
 // codes the SDK raises before a request ever leaves the process (prefixed so
 // they can't collide with a relay code): `client_no_identity`, `client_empty_message`,
-// `client_message_too_long`, `client_recipient_unverified`, `client_bad_argument`.
+// `client_message_too_long`, `client_recipient_unverified`, `client_recipient_no_attachments`,
+// `client_attachment_too_large`, `client_bad_argument`.
 //
 // The full reference lives in ERRORS.md.
 
@@ -25,9 +26,11 @@ const RETRIABLE = new Set([
 const EXPLAIN = {
   // --- client-side (raised before the request) ---
   client_no_identity: 'This call needs an identity. Construct the client with { identity } or pass one to createIdentity().',
-  client_empty_message: 'A wire needs a non-empty string body.',
-  client_message_too_long: 'The message exceeds the 4000-character wire limit — split it into multiple wires.',
+  client_empty_message: 'A wire needs a non-empty body — text or at least one attachment.',
+  client_message_too_long: 'The message text exceeds the 4000-character wire limit — split it into multiple wires.',
   client_recipient_unverified: "The recipient's directory record failed signature verification — refusing to encrypt to an unverifiable key.",
+  client_recipient_no_attachments: "The recipient does not advertise the attachments-v1 capability, so it can't receive files — refusing to drop them silently.",
+  client_attachment_too_large: 'The attachments exceed the client size limit. Very large blobs also cost tokens under the standard meter and may exceed the relay ciphertext cap.',
   client_bad_argument: 'A required argument was missing or the wrong type.',
   client_network: 'Could not reach the relay. Check the server URL and that the relay is up.',
   // --- relay-side (echoed from the response) ---

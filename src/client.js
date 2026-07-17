@@ -13,10 +13,54 @@ import {
   verifyAgentRecord,
   encrypt,
   decrypt,
+  toB64,
+  fromB64,
 } from './crypto.js';
-import { packWire, unpackWire, PRIORITIES, WIRE_ENVELOPE_CAPABILITY } from './wire.js';
+import {
+  packWire,
+  unpackWire,
+  PRIORITIES,
+  WIRE_ENVELOPE_CAPABILITY,
+  ATTACHMENTS_CAPABILITY,
+  MAX_ATTACHMENTS,
+} from './wire.js';
 
 export const MAX_WIRE_CHARS = 4000;
+// Friendly preflight ceiling on total attachment bytes per wire; the relay's
+// ciphertext cap is the real authority (and metering makes big wires costly).
+export const MAX_ATTACHMENT_TOTAL_BYTES = 16 * 1024 * 1024;
+
+// base64 wire attachments → caller bytes. A descriptor that fails to decode
+// keeps its name/mime with empty bytes so a corrupt file is visible, not hidden.
+function decodeAttachments(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map((a) => ({ name: a.name, mime: a.mime, size: a.size, data: fromB64(a.data) }));
+}
+
+// caller [{ name?, mime?, data:Uint8Array|Buffer }] → on-wire base64 shape.
+function encodeAttachments(attachments) {
+  if (!Array.isArray(attachments)) throw new Error('attachments must be an array');
+  if (attachments.length > MAX_ATTACHMENTS) throw new Error(`at most ${MAX_ATTACHMENTS} attachments per wire`);
+  let total = 0;
+  const out = attachments.map((a, i) => {
+    if (!a || typeof a !== 'object') throw new Error(`attachment ${i} must be an object`);
+    const bytes = a.data;
+    if (!(bytes instanceof Uint8Array || Buffer.isBuffer(bytes))) {
+      throw new Error(`attachment ${i} data must be a Uint8Array or Buffer`);
+    }
+    total += bytes.length;
+    return {
+      name: a.name == null ? undefined : String(a.name),
+      mime: a.mime == null ? undefined : String(a.mime),
+      size: bytes.length,
+      data: toB64(bytes),
+    };
+  });
+  if (total > MAX_ATTACHMENT_TOTAL_BYTES) {
+    throw new Error(`attachments total ${total} bytes exceeds the ${MAX_ATTACHMENT_TOTAL_BYTES}-byte client limit`);
+  }
+  return out;
+}
 
 // Mirrors the relay's address grammar. Used to tell an address from a handle
 // without a round-trip: a TG- address needs no directory lookup.
@@ -39,9 +83,10 @@ export class TelegraphClient {
   // threading (default on): advertise WIRE_ENVELOPE_CAPABILITY so peers on a
   // current SDK send you structured wires (threadId/replyTo/priority). Opt out
   // with { threading: false } to keep it out of your public record.
-  async register({ handle, bio = '', capabilities = [], threading = true }) {
+  async register({ handle, bio = '', capabilities = [], threading = true, attachments = true }) {
     let caps = capabilities;
     if (threading && !caps.includes(WIRE_ENVELOPE_CAPABILITY)) caps = [...caps, WIRE_ENVELOPE_CAPABILITY];
+    if (attachments && !caps.includes(ATTACHMENTS_CAPABILITY)) caps = [...caps, ATTACHMENTS_CAPABILITY];
     const ts = Date.now();
     const { signPublicKey, boxPublicKey, signSecretKey } = this.identity;
     const sig = signFields(registerFields(handle, signPublicKey, boxPublicKey, bio, caps, ts), signSecretKey);
@@ -78,20 +123,31 @@ export class TelegraphClient {
   // the box — the relay never sees it. Applied only when the recipient advertises
   // WIRE_ENVELOPE_CAPABILITY; otherwise the wire is still delivered as a plain
   // message and the result flags threadingApplied: false (an old peer never gets JSON).
-  async send(to, text, { idempotencyKey, threadId, replyTo, priority } = {}) {
-    if (typeof text !== 'string' || text.length === 0) throw new Error('empty message');
-    // 4000 UTF-16 units bounds the payload at 12KB UTF-8 → ~16,024 base64
-    // chars, safely inside the relay's 16,384 ciphertext cap for any input.
+  async send(to, text, { idempotencyKey, threadId, replyTo, priority, attachments } = {}) {
+    if (typeof text !== 'string') throw new Error('text must be a string');
+    const hasAttachments = attachments != null &&
+      (Array.isArray(attachments) ? attachments.length > 0 : true);
+    if (text.length === 0 && !hasAttachments) throw new Error('empty message — need text or an attachment');
+    // 4000 UTF-16 units bounds the text at 12KB UTF-8 → ~16,024 base64 chars,
+    // inside the default 16 KB ciphertext cap. Attachments are bounded separately.
     if (text.length > MAX_WIRE_CHARS) throw new Error(`a wire is max ${MAX_WIRE_CHARS} chars — split it up`);
     if (priority != null && !PRIORITIES.includes(priority)) throw new Error(`priority must be one of ${PRIORITIES.join('|')}`);
+    const encodedAttachments = hasAttachments ? encodeAttachments(attachments) : null;
     const recipient = await this.lookup(to);
     if (!recipient.verified) {
       throw new Error('recipient directory record failed signature verification — refusing to encrypt');
     }
+    const caps = Array.isArray(recipient.capabilities) ? recipient.capabilities : [];
+    if (hasAttachments && !caps.includes(ATTACHMENTS_CAPABILITY)) {
+      throw new Error(`recipient does not advertise ${ATTACHMENTS_CAPABILITY} — refusing to drop files silently`);
+    }
     const wantsThreading = threadId != null || replyTo != null || priority != null;
-    const recipientCapable = Array.isArray(recipient.capabilities) && recipient.capabilities.includes(WIRE_ENVELOPE_CAPABILITY);
-    const applyThreading = wantsThreading && recipientCapable;
-    const plaintext = applyThreading ? packWire(text, { threadId, replyTo, priority }) : text;
+    const applyThreading = wantsThreading && caps.includes(WIRE_ENVELOPE_CAPABILITY);
+    const structured = applyThreading || hasAttachments;
+    const wireOpts = {};
+    if (applyThreading) Object.assign(wireOpts, { threadId, replyTo, priority });
+    if (hasAttachments) wireOpts.attachments = encodedAttachments;
+    const plaintext = structured ? packWire(text, wireOpts) : text;
     const { nonce, ciphertext } = encrypt(plaintext, recipient.boxPublicKey, this.identity.boxSecretKey);
     const ts = Date.now();
     const sig = signFields(
@@ -125,7 +181,8 @@ export class TelegraphClient {
       replyTo: applyThreading ? (replyTo ?? null) : null,
       priority: applyThreading ? (priority ?? null) : null,
       threadingApplied: applyThreading,
-      ...(wantsThreading && !recipientCapable ? { threadingDropped: `recipient does not advertise ${WIRE_ENVELOPE_CAPABILITY}` } : {}),
+      attachments: hasAttachments ? encodedAttachments.length : 0,
+      ...(wantsThreading && !applyThreading ? { threadingDropped: `recipient does not advertise ${WIRE_ENVELOPE_CAPABILITY}` } : {}),
     };
   }
 
@@ -158,6 +215,7 @@ export class TelegraphClient {
       let threadId = null;
       let replyTo = null;
       let priority = null;
+      let attachments = [];
       if (sender && sender.address === m.from && verifyAgentRecord(sender)) {
         const sigOk = verifyFields(
           messageFields(m.to, m.from, m.nonce, m.ciphertext, m.ts),
@@ -172,6 +230,7 @@ export class TelegraphClient {
           threadId = env.threadId;
           replyTo = env.replyTo;
           priority = env.priority;
+          attachments = decodeAttachments(env.attachments);
         }
       }
       return {
@@ -182,6 +241,7 @@ export class TelegraphClient {
         receivedAt: m.receivedAt,
         text,
         verified,
+        attachments,
         threadId,
         replyTo,
         priority,
@@ -264,7 +324,7 @@ export class TelegraphClient {
     const r = await this.#req('GET', '/v1/sent', null, { signed: true });
     return (r.messages ?? []).map((m) => {
       const plaintext = decrypt(m.nonce, m.ciphertext, this.identity.boxPublicKey, this.identity.boxSecretKey);
-      const env = plaintext !== null ? unpackWire(plaintext) : { text: null, threadId: null, replyTo: null, priority: null };
+      const env = plaintext !== null ? unpackWire(plaintext) : { text: null, threadId: null, replyTo: null, priority: null, attachments: [] };
       return {
         id: m.id,
         to: m.to,
@@ -275,6 +335,7 @@ export class TelegraphClient {
         threadId: env.threadId,
         replyTo: env.replyTo,
         priority: env.priority,
+        attachments: decodeAttachments(env.attachments),
       };
     });
   }

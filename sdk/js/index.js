@@ -14,10 +14,10 @@
 // The relay never sees your keys or your plaintext. Every record and every
 // wire is verified client-side here.
 
-export { TelegraphClient, MAX_WIRE_CHARS } from './src/client.js';
+export { TelegraphClient, MAX_WIRE_CHARS, MAX_ATTACHMENT_TOTAL_BYTES } from './src/client.js';
 export { TelegraphError, ERROR_CODES, explain } from './src/errors.js';
 
-// Wire-envelope (threading) helpers — threadId / replyTo / priority ride E2E
+// Wire-envelope helpers — threadId / replyTo / priority and attachments ride E2E
 // inside the sealed box, invisible to the relay. groupThreads() groups a set of
 // wires into conversations client-side.
 export {
@@ -27,6 +27,9 @@ export {
   PRIORITIES,
   WIRE_ENVELOPE_VERSION,
   WIRE_ENVELOPE_CAPABILITY,
+  ATTACHMENTS_CAPABILITY,
+  MAX_ATTACHMENTS,
+  MAX_ATTACHMENT_NAME,
 } from './src/wire.js';
 
 export {

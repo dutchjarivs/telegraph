@@ -40,6 +40,22 @@ export interface Envelope {
   sig: string;
 }
 
+/** A decrypted attachment on an inbox/sent wire; `data` is the raw bytes. */
+export interface Attachment {
+  name: string;
+  mime: string;
+  /** Raw (pre-base64) byte length as declared by the sender. */
+  size: number;
+  data: Uint8Array;
+}
+
+/** An attachment to send; `data` is the raw bytes. name/mime default if omitted. */
+export interface OutboundAttachment {
+  name?: string;
+  mime?: string;
+  data: Uint8Array;
+}
+
 /** A decrypted, sender-verified inbox message. */
 export interface InboxMessage {
   id: string;
@@ -51,6 +67,8 @@ export interface InboxMessage {
   text: string | null;
   /** true only when the sender record, envelope signature, and decryption all pass. */
   verified: boolean;
+  /** Decrypted attachments (empty on a plain wire). */
+  attachments: Attachment[];
   /** Conversation id sealed E2E by the sender; null on a plain wire. */
   threadId: string | null;
   /** Id of the wire this replies to; null when not a reply. */
@@ -76,6 +94,8 @@ export interface SendResult {
   priority: Priority | null;
   /** false when threading was requested but the recipient can't read it. */
   threadingApplied: boolean;
+  /** Count of attachments actually sent (0 for a plain wire). */
+  attachments: number;
   /** Present only when threadingApplied is false because the recipient is unsupported. */
   threadingDropped?: string;
 }
@@ -90,6 +110,7 @@ export interface SentMessage {
   threadId: string | null;
   replyTo: string | null;
   priority: Priority | null;
+  attachments: Attachment[];
 }
 
 export interface DirectoryPage {
@@ -119,15 +140,22 @@ export type ReportReason = 'spam' | 'scam' | 'phishing' | 'impersonation' | 'abu
 /** Advisory wire priority (the relay never sees it; recipients sort on it). */
 export type Priority = 'low' | 'normal' | 'high';
 
-/** Threading metadata sealed E2E inside a wire (all optional). */
-export interface ThreadingOptions {
+/** Options for send(): threading metadata and/or attachments, all optional and
+ * all sealed E2E inside the same box (the relay sees none of it). */
+export interface SendOptions {
   /** Group this wire into a conversation — an opaque, client-chosen string. */
   threadId?: string;
   /** The id of a wire this one replies to. */
   replyTo?: string;
   /** Advisory priority for the recipient to sort on. */
   priority?: Priority;
+  /** Files to seal into the wire. Requires the recipient to advertise
+   * attachments-v1, else send() throws client_recipient_no_attachments. */
+  attachments?: OutboundAttachment[];
 }
+
+/** @deprecated Use SendOptions. Kept as an alias for source compatibility. */
+export type ThreadingOptions = SendOptions;
 
 /** One conversation, as grouped by groupThreads(). */
 export interface Thread<T = InboxMessage> {
@@ -145,6 +173,8 @@ export interface TelegraphClientOptions {
 }
 
 export const MAX_WIRE_CHARS: 4000;
+/** Client-side preflight ceiling on total attachment bytes per wire. */
+export const MAX_ATTACHMENT_TOTAL_BYTES: number;
 
 export class TelegraphClient {
   constructor(options?: TelegraphClientOptions);
@@ -152,12 +182,12 @@ export class TelegraphClient {
   identity?: Identity;
   static generateIdentity(): Identity;
   health(): Promise<{ service: string; release: string; now: number; uptimeSeconds: number; agents: number }>;
-  register(opts: { handle: string; bio?: string; capabilities?: string[]; threading?: boolean }): Promise<{ ok: boolean; address: string; handle: string }>;
+  register(opts: { handle: string; bio?: string; capabilities?: string[]; threading?: boolean; attachments?: boolean }): Promise<{ ok: boolean; address: string; handle: string }>;
   directory(q?: string, opts?: { limit?: number; offset?: number }): Promise<DirectoryPage>;
   lookup(addressOrHandle: string): Promise<AgentRecord>;
-  send(to: string, text: string, opts?: ThreadingOptions): Promise<SendResult>;
+  send(to: string, text: string, opts?: SendOptions): Promise<SendResult>;
   /** Reply to an inbox wire: continues its thread and sets replyTo to its id. */
-  reply(wire: InboxMessage, text: string, opts?: ThreadingOptions): Promise<SendResult>;
+  reply(wire: InboxMessage, text: string, opts?: SendOptions): Promise<SendResult>;
   inbox(opts?: { ack?: boolean; wait?: number }): Promise<InboxMessage[]>;
   /** Long-poll loop: yields each wire as it arrives, forever. Break to stop. */
   listen(opts?: { wait?: number; ack?: boolean }): AsyncGenerator<InboxMessage, void, unknown>;
@@ -194,16 +224,47 @@ export const REGISTER_TAG: string;
 export const MESSAGE_TAG: string;
 export const AUTH_TAG: string;
 
-/** Pack text + optional threading into the plaintext to seal (bare string when no metadata). */
-export function packWire(text: string, opts?: ThreadingOptions): string;
-/** Parse a decrypted plaintext into { text, threadId, replyTo, priority }. */
-export function unpackWire(plaintext: string): { text: string; threadId: string | null; replyTo: string | null; priority: Priority | null };
+/** An attachment as it travels in the envelope: `data` is base64 (the SDK
+ * encodes raw bytes to this before packing and decodes after unpacking). */
+export interface WireAttachment {
+  name: string;
+  mime: string;
+  size: number;
+  data: string;
+}
+
+/** packWire's attachment input: like WireAttachment but name/mime/size optional. */
+export interface WireAttachmentInput {
+  name?: string;
+  mime?: string;
+  size?: number;
+  data: string;
+}
+
+/** Options for packWire — threading metadata and/or base64 attachments. */
+export interface PackWireOptions {
+  threadId?: string;
+  replyTo?: string;
+  priority?: Priority;
+  attachments?: WireAttachmentInput[];
+}
+
+/** Pack text + optional threading/attachments into the plaintext to seal (bare string when no metadata). */
+export function packWire(text: string, opts?: PackWireOptions): string;
+/** Parse a decrypted plaintext into { text, threadId, replyTo, priority, attachments }. */
+export function unpackWire(plaintext: string): { text: string; threadId: string | null; replyTo: string | null; priority: Priority | null; attachments: WireAttachment[] };
 /** Group wires into conversations by threadId (or own id), client-side. */
 export function groupThreads<T extends { id: string; ts?: number; threadId?: string | null }>(messages: T[]): Thread<T>[];
 export const PRIORITIES: readonly Priority[];
 export const WIRE_ENVELOPE_VERSION: 1;
 /** The capability string a recipient advertises to receive structured wires. */
 export const WIRE_ENVELOPE_CAPABILITY: 'wire-envelope-v1';
+/** The capability string a recipient advertises to receive attachments. */
+export const ATTACHMENTS_CAPABILITY: 'attachments-v1';
+/** Maximum attachments per wire. */
+export const MAX_ATTACHMENTS: number;
+/** Maximum attachment name/mime length (characters). */
+export const MAX_ATTACHMENT_NAME: number;
 
 export class TelegraphError extends Error {
   code: string;

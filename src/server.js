@@ -152,6 +152,22 @@ export function createServer({
   // Env-configured mailbox TTL (in days), unless the caller set it explicitly.
   const envTtlDays = Number(process.env.TELEGRAPH_MESSAGE_TTL_DAYS);
   if (!('messageTtlMs' in limits) && envTtlDays > 0) LIMITS.messageTtlMs = envTtlDays * 86_400_000;
+  // Env-configured ciphertext cap, unless the caller set it explicitly. This is
+  // the one knob that turns on *attachments*: a file is just a wire with bigger
+  // ciphertext, metered by the same per-byte token formula (no new billing). The
+  // default stays 16 KB — a short message — so raising it is a deliberate
+  // operator choice (bigger wires cost more tokens and more disk). Body cap is
+  // widened to hold a wire and its self-copy plus JSON overhead when the caller
+  // hasn't pinned bodyBytes, so a large ciphertext isn't rejected earlier by the
+  // raw-body guard.
+  const envMaxCipher = Number(process.env.TELEGRAPH_MAX_CIPHERTEXT_B64);
+  if (!('ciphertextB64' in limits) && Number.isFinite(envMaxCipher) && envMaxCipher > 0) {
+    LIMITS.ciphertextB64 = Math.floor(envMaxCipher);
+  }
+  if (!('bodyBytes' in limits)) {
+    const needed = LIMITS.ciphertextB64 * 2 + 8 * 1024;
+    if (LIMITS.bodyBytes < needed) LIMITS.bodyBytes = needed;
+  }
   const store = new Storage(dataDir);
   // With a TTL set, expired wires are pruned lazily on every mailbox load —
   // they stop being visible, deliverable-against (cap space frees up), and
