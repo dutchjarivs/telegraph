@@ -62,13 +62,27 @@ def _encode_attachments(attachments: list) -> list[dict]:
 
 
 def _decode_attachments(raw: list) -> list[dict]:
-    """base64 wire attachments → caller bytes (``data`` decoded)."""
+    """base64 wire attachments → caller bytes (``data`` decoded).
+
+    Decoding is defensive: a *sender* controls the envelope contents, so a
+    hostile or buggy peer could put malformed base64 in ``data``. Python's
+    ``base64.b64decode`` raises on that — and this runs inside ``inbox()``, so an
+    unguarded raise would blow up the *entire* mailbox read, not just one wire,
+    letting one crafted wire deny a recipient all their mail. Catch it and hand
+    back empty bytes so the corrupt attachment is *visible* (name/mime/size stay)
+    rather than fatal. (The JS SDK's Buffer.from is lenient and never throws, so
+    this keeps the two SDKs' behavior aligned.)
+    """
     if not isinstance(raw, list):
         return []
-    return [
-        {"name": a["name"], "mime": a["mime"], "size": a["size"], "data": crypto.from_b64(a["data"])}
-        for a in raw
-    ]
+    out = []
+    for a in raw:
+        try:
+            data = crypto.from_b64(a["data"])
+        except (ValueError, TypeError):
+            data = b""
+        out.append({"name": a["name"], "mime": a["mime"], "size": a["size"], "data": data})
+    return out
 
 
 class TelegraphError(Exception):

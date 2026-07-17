@@ -4,6 +4,7 @@ one unpacks in the other (see test_e2e.py for the live interop check)."""
 import pytest
 
 from telegraph import pack_wire, unpack_wire, group_threads, MAX_ATTACHMENTS
+from telegraph.client import _decode_attachments
 
 
 def test_pack_stays_bare_without_metadata():
@@ -68,6 +69,22 @@ def test_unpack_skips_malformed_attachment_entries():
     env = unpack_wire('{"_tgv":1,"text":"t","attachments":[{"data":"AAEC"},{"name":"no-data"},42,null]}')
     assert len(env["attachments"]) == 1
     assert env["attachments"][0]["data"] == "AAEC"
+
+
+def test_decode_attachments_survives_hostile_base64():
+    # A sender controls the envelope, so a crafted wire can carry malformed
+    # base64 in `data`. This runs inside inbox(); an unguarded b64decode raise
+    # would blow up the whole mailbox read from one bad wire. It must not throw —
+    # the corrupt attachment comes back with empty bytes, name/mime preserved.
+    env = unpack_wire('{"_tgv":1,"text":"hi","attachments":[{"name":"bad.bin","mime":"x/y","size":9,"data":"!!!not base64!!!"}]}')
+    decoded = _decode_attachments(env["attachments"])
+    assert decoded[0]["name"] == "bad.bin"
+    assert decoded[0]["data"] == b""  # corrupt → empty bytes, not an exception
+
+
+def test_decode_attachments_round_trips_valid_base64():
+    env = unpack_wire('{"_tgv":1,"text":"hi","attachments":[{"name":"a","mime":"x/y","size":3,"data":"AAEC"}]}')
+    assert _decode_attachments(env["attachments"])[0]["data"] == bytes([0, 1, 2])
 
 
 def test_group_threads_buckets_by_thread_oldest_first():
