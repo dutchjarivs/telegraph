@@ -84,36 +84,75 @@ and that we require https + private-range blocking with no exceptions.
 
 ---
 
-## 3. Key rotation
+## 3. Key rotation (design sharpened 2026-07-16 — ready for a green-light call)
 
-**Why deferred:** crypto-identity surgery. Get it subtly wrong and you either
-lock an agent out or accept forged rotations. Same class of "worse-than-nothing
-if broken" risk as the double-ratchet gap — not an unsupervised job.
+**Split the problem in two — they have very different risk:**
 
-**Recommended design — signing key as root, box key rotatable:**
-- The **signing key stays the identity root** (the address derives from it; that
-  never changes). The **box (encryption) key becomes rotatable**: the agent
-  publishes a new `boxPublicKey` in a fresh signed registration (ts advances, the
-  existing stale-registration guard already prevents rollback).
-- Queued wires already carry a `senderRecord` snapshot, and mailbox wires are
-  sealed to the box key that was current at send time — so in-flight mail stays
-  decryptable across a rotation as long as the recipient keeps prior box secret
-  keys. **Client keeps a keyring** of retired box secret keys and tries them in
-  order on decrypt. The SDK identity file grows a `retiredBoxKeys: []`.
-- **Trust-on-rotation warning:** `lookup()`/`inbox()` already verify the record.
-  Add: the SDK caches the last-seen `boxPublicKey` per correspondent and surfaces
-  `keyChanged: true` when it differs, so an agent (or its human) is warned when a
-  handle's key changes — the moment a malicious relay key-swap would show up.
-- Rotating the **signing** key = a new identity/address (can't be the same
-  agent), so "rotation" of the root is really "migration": publish a signed
-  statement from the old key vouching for the new address, shown in the directory.
-  Optional, later.
+### 3a. Box-key rotation — LOW risk, recommend green-lighting
 
-**Effort:** medium. Additive (old identities without `retiredBoxKeys` just never
-rotate). Needs careful tests around cross-rotation decryption and the warning.
+**Key insight (why this is safer than it first looks):** every registration —
+including a rotation — is **signed by the signing key**, and the signing key is
+the identity root (the address derives from it and never changes). A relay
+cannot forge a box-key change for an agent without that agent's *signing* secret,
+which it never has. So the existing self-signature already secures box-key
+rotation against a malicious relay; there is no new "accept forged rotations"
+risk. The `keyChanged` surface below is therefore **UX/defense-in-depth, not a
+security boundary** — a forged rotation fails signature verification outright.
 
-**Open question for Tristan:** is box-key rotation with a client keyring enough
-for now, leaving signing-key migration (the harder half) for later?
+**Protocol change:** none to the wire format, none to signatures. An agent
+rotates by publishing a fresh **signed** registration with a new `boxPublicKey`
+(the `ts` advances; the existing stale-registration guard already blocks
+rollback to an older record). The relay stores it exactly as any re-registration.
+
+**Crypto correctness (walked through):** a wire *to* X is `nacl.box`-sealed to
+X's `boxPublicKey` current at send time; X opens it with the matching box secret.
+After X rotates, in-flight wires sealed to the *old* box key need the *old* box
+secret → **X keeps a client-side keyring** of retired box secret keys and tries
+them in order on decrypt. The sender side is already handled: each stored wire
+carries a `senderRecord` snapshot, so the sender's box *public* key at send time
+is frozen with the wire and a *sender's* later rotation never breaks already-sent
+mail. Net: the keyring is needed **only on the recipient side, only for recipient
+rotations**.
+
+**SDK surface (additive):**
+- identity file grows `retiredBoxKeys: [{ boxPublicKey, boxSecretKey, retiredAt }]`.
+- `rotateBoxKey()` → generates a new box keypair, moves the current one into
+  `retiredBoxKeys`, re-registers (signed) with the new `boxPublicKey`. Returns the
+  new record.
+- `inbox()`/`sent()` decrypt loop tries the current box secret, then each retired
+  key, oldest rotation last. `text=null` (undecryptable) only after all fail.
+- `lookup()`/`inbox()` cache the last-seen `boxPublicKey` per correspondent and
+  set `keyChanged: true` on a wire/record when it differs — an informational
+  heads-up ("this correspondent rotated"), safe because it's signature-verified.
+
+**Backward compatibility:** fully additive. An identity file without
+`retiredBoxKeys` simply never rotates; a peer that never rotates behaves exactly
+as today. No capability flag needed (rotation changes only the agent's own
+record; correspondents already re-fetch and verify records).
+
+**Test matrix:** (1) rotate, then a wire sealed to the old key still decrypts via
+the keyring; (2) a wire sealed to the new key decrypts; (3) multiple rotations,
+oldest wire still opens; (4) a forged box-key change (signed by a wrong key) is
+rejected at `verifyAgentRecord`; (5) `keyChanged` fires on a real rotation and
+not on a steady key; (6) a fully-retired key eventually drops from the ring
+(bounded keyring) and those wires become `text=null`, not a crash.
+
+**What Tristan needs to decide:** approve box-key rotation as specced above
+(client-side keyring + signed re-registration, no relay change beyond what
+re-registration already does). This is the same risk class as threading — the
+relay stays blind and unchanged; all the new logic is client-side and
+signature-gated.
+
+### 3b. Signing-key migration — HIGHER risk, keep deferred
+
+Rotating the **signing** key changes the address (the address *is* the signing
+key's fingerprint), so it isn't rotation, it's **migration to a new identity**.
+Design when wanted: the old key publishes a signed statement vouching for the new
+address; the directory shows the link; correspondents choose whether to follow
+it. This is where the genuine "lock-out vs. forged-takeover" tradeoffs live, and
+it should stay a supervised, separate decision. **Not part of the 3a green-light.**
+
+**Effort:** 3a is medium and additive; 3b is a separate later project.
 
 ---
 
