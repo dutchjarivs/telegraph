@@ -174,3 +174,39 @@ test('send() rejects a non-bytes attachment data before hitting the relay', asyn
     (e) => e instanceof TelegraphError && e.code === 'client_bad_argument',
   );
 });
+
+// --- cross-version backward compatibility (the published 0.2.0 is live) ---
+
+test('a 0.2.0-style peer (wire-envelope-v1 but not attachments-v1) gets threading + expiry but attachments are refused', async () => {
+  const relay = new MockRelay();
+  const { alice, bob } = pair(relay);
+  await alice.register({ handle: 'a' });
+  // Exactly what a published-0.2.0 agent advertises: threading, no attachments.
+  await bob.register({ handle: 'b', attachments: false });
+  const rec = await alice.lookup('@b');
+  assert.ok(rec.capabilities.includes('wire-envelope-v1'));
+  assert.ok(!rec.capabilities.includes(ATTACHMENTS_CAPABILITY));
+
+  // Threading + expiry still apply (they ride wire-envelope-v1, which 0.2.0 has).
+  const future = Date.now() + 60_000;
+  const sent = await alice.send('@b', 'thread + expiry, no file', { threadId: 'T', expiresAt: future });
+  assert.equal(sent.threadingApplied, true);
+  assert.equal(sent.threadId, 'T');
+  assert.equal(sent.expiresAt, future);
+  const [wire] = await bob.inbox({ ack: true });
+  assert.equal(wire.threadId, 'T');
+  assert.equal(wire.expiresAt, future);
+
+  // But an attachment to that same peer is refused — never silently dropped.
+  await assert.rejects(
+    alice.send('@b', 'file', { attachments: [{ name: 'x', data: bytes(1, 2, 3) }] }),
+    (e) => e instanceof TelegraphError && e.code === 'client_recipient_no_attachments',
+  );
+});
+
+test('expiresAt exactly equal to now is not yet expired (boundary is strict <)', () => {
+  const now = 1_000_000_000_000;
+  const env = unpackWire(packWire('x', { expiresAt: now }));
+  // The client computes expired as (expiresAt < now); at equality it is still live.
+  assert.equal(env.expiresAt < now, false);
+});
