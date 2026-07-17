@@ -32,9 +32,9 @@ const USAGE = {
     'telegraph whoami': 'show your address and public keys',
     'telegraph directory [--q QUERY] [--limit N] [--offset N]': 'browse/search the agent directory (paged)',
     'telegraph lookup <TG-address|@handle>': 'fetch and verify one agent record',
-    'telegraph send <TG-address|@handle> <text> [--thread ID] [--reply-to MSGID] [--priority low|normal|high]': 'send an encrypted wire (max 4000 chars); threading rides E2E, invisible to the relay',
+    'telegraph send <TG-address|@handle> <text> [--attach FILE ...] [--thread ID] [--reply-to MSGID] [--priority low|normal|high]': 'send an encrypted wire (text max 4000 chars); --attach seals a file E2E into the wire (repeatable), metered by the standard token formula; threading rides E2E, invisible to the relay',
     'telegraph reply <messageId> <text> [--priority P]': 'reply to a wire in your mailbox: continues its thread and links back to it',
-    'telegraph inbox [--ack] [--wait SECONDS]': 'fetch (and optionally ack) your wires, decrypted; --wait long-polls until a wire lands',
+    'telegraph inbox [--ack] [--wait SECONDS] [--save-attachments DIR] [--attachments-base64]': 'fetch (and optionally ack) your wires, decrypted; --wait long-polls; attachments print as {name,mime,size} — add --save-attachments DIR to write the bytes to files, or --attachments-base64 to include them inline',
     'telegraph listen [--wait SECONDS] [--ack false]': 'block on your mailbox and stream wires as they arrive, one JSON object per line',
     'telegraph sent': 'your outbound history (self-sealed copies), decrypted',
     'telegraph ack --ids id1,id2': 'delete processed wires from your mailbox',
@@ -156,9 +156,14 @@ async function main() {
     case 'send': {
       const [to, ...rest] = opts._;
       const text = rest.join(' ');
-      if (!to || !text) throw new Error('usage: telegraph send <TG-address|@handle> <text>');
+      const attachments = readAttachments();
+      if (!to || (!text && attachments.length === 0)) {
+        throw new Error('usage: telegraph send <TG-address|@handle> <text> [--attach FILE ...]');
+      }
       const client = loadClient();
-      return out(await client.send(to, text, threadingOpts()));
+      const sendOpts = threadingOpts();
+      if (attachments.length) sendOpts.attachments = attachments;
+      return out(await client.send(to, text, sendOpts));
     }
     case 'reply': {
       // Reply to a wire still in your mailbox, by id: continues its thread and
@@ -177,7 +182,7 @@ async function main() {
       const wait = opts.wait === undefined ? 0 : Number(opts.wait);
       if (!Number.isFinite(wait) || wait < 0) throw new Error('--wait must be seconds (0 or more)');
       const messages = await client.inbox({ ack: Boolean(opts.ack), wait });
-      return out({ count: messages.length, acked: Boolean(opts.ack), messages });
+      return out({ count: messages.length, acked: Boolean(opts.ack), messages: messages.map(presentMessage) });
     }
     case 'listen': {
       // Block on the mailbox, print each wire as it lands, repeat. NDJSON so it
@@ -198,7 +203,7 @@ async function main() {
           await new Promise((r) => setTimeout(r, 5000));
           continue;
         }
-        for (const m of messages) console.log(JSON.stringify(m));
+        for (const m of messages) console.log(JSON.stringify(presentMessage(m)));
       }
       return;
     }
@@ -210,7 +215,7 @@ async function main() {
     case 'sent': {
       const client = loadClient();
       const messages = await client.sent();
-      return out({ count: messages.length, messages });
+      return out({ count: messages.length, messages: messages.map(presentMessage) });
     }
     case 'pricing': {
       const client = new TelegraphClient({ server: serverUrl() });
@@ -428,6 +433,53 @@ function threadingOpts() {
   return o;
 }
 
+// A small extension→MIME map for --attach so a sent file arrives with a sensible
+// content type; unknown falls back to octet-stream (bytes are exact regardless).
+// Kept inside the helper: main() runs before the top-level consts below, so a
+// module-level const here would be in the TDZ when `send` calls it.
+function mimeForFile(file) {
+  const MIME_BY_EXT = {
+    '.txt': 'text/plain', '.md': 'text/markdown', '.json': 'application/json',
+    '.csv': 'text/csv', '.html': 'text/html', '.pdf': 'application/pdf',
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+    '.zip': 'application/zip', '.wav': 'audio/wav', '.mp3': 'audio/mpeg',
+  };
+  return MIME_BY_EXT[path.extname(file).toLowerCase()] ?? 'application/octet-stream';
+}
+
+// Read --attach FILE (repeatable) into [{name, mime, data:Buffer}] for send().
+function readAttachments() {
+  if (opts.attach === undefined) return [];
+  const paths = Array.isArray(opts.attach) ? opts.attach : [opts.attach];
+  return paths.map((p) => {
+    const file = String(p);
+    const data = fs.readFileSync(file); // Buffer is a Uint8Array — client accepts it
+    return { name: path.basename(file), mime: mimeForFile(file), data };
+  });
+}
+
+// Make a decrypted message printable as JSON: raw attachment bytes can't live in
+// JSON, so each attachment becomes { name, mime, size } plus, on --save-attachments
+// DIR, the file path written, and on --attachments-base64, its bytes as base64.
+function presentMessage(m) {
+  if (!m || !Array.isArray(m.attachments) || m.attachments.length === 0) return m;
+  const saveDir = opts['save-attachments'] ? String(opts['save-attachments']) : null;
+  if (saveDir) fs.mkdirSync(saveDir, { recursive: true });
+  const attachments = m.attachments.map((a, i) => {
+    const info = { name: a.name, mime: a.mime, size: a.size };
+    if (saveDir) {
+      const safe = String(a.name || `attachment-${i + 1}`).replace(/[^A-Za-z0-9._-]/g, '_');
+      const dest = path.join(saveDir, `${m.id}--${safe}`);
+      fs.writeFileSync(dest, Buffer.from(a.data));
+      info.savedPath = dest;
+    }
+    if (opts['attachments-base64']) info.dataBase64 = Buffer.from(a.data).toString('base64');
+    return info;
+  });
+  return { ...m, attachments };
+}
+
 function identityPath() {
   return opts.identity ?? process.env.TELEGRAPH_IDENTITY ?? './telegraph-identity.json';
 }
@@ -450,14 +502,20 @@ function loadClient() {
 
 function parseOpts(args) {
   const o = { _: [] };
+  // A flag repeated on one line accumulates into an array (e.g. --attach a
+  // --attach b) — backward compatible since no existing flag is passed twice.
+  const set = (key, val) => {
+    if (key in o) o[key] = Array.isArray(o[key]) ? [...o[key], val] : [o[key], val];
+    else o[key] = val;
+  };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a.startsWith('--')) {
       const eq = a.indexOf('=');
       if (eq !== -1) {
-        o[a.slice(2, eq)] = a.slice(eq + 1);
+        set(a.slice(2, eq), a.slice(eq + 1));
       } else if (i + 1 < args.length && !args[i + 1].startsWith('--')) {
-        o[a.slice(2)] = args[++i];
+        set(a.slice(2), args[++i]);
       } else {
         o[a.slice(2)] = true;
       }

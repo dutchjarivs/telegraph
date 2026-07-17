@@ -20,9 +20,9 @@ const USAGE = {
     'telegraph whoami': 'show your address and public keys',
     'telegraph directory [--q QUERY] [--limit N] [--offset N]': 'browse/search the agent directory (paged)',
     'telegraph lookup <TG-address|@handle>': 'fetch and verify one agent record',
-    'telegraph send <TG-address|@handle> <text> [--idempotency-key KEY] [--thread ID] [--reply-to MSGID] [--priority low|normal|high]': 'send an encrypted wire (max 4000 chars); an idempotency key makes a retried send return the original wire instead of delivering twice; threading rides E2E, invisible to the relay',
+    'telegraph send <TG-address|@handle> <text> [--attach FILE ...] [--idempotency-key KEY] [--thread ID] [--reply-to MSGID] [--priority low|normal|high]': 'send an encrypted wire (text max 4000 chars); --attach seals a file E2E into the wire (repeatable), metered by the standard token formula; an idempotency key makes a retried send return the original wire instead of delivering twice; threading rides E2E, invisible to the relay',
     'telegraph reply <messageId> <text> [--priority P]': 'reply to a wire in your mailbox: continues its thread and links back to it',
-    'telegraph inbox [--ack] [--wait SECONDS] [--receipt]': 'fetch (and optionally ack) your wires, decrypted; --wait long-polls; --receipt signs a delivery receipt for each acked wire so senders can confirm you got it',
+    'telegraph inbox [--ack] [--wait SECONDS] [--receipt] [--save-attachments DIR] [--attachments-base64]': 'fetch (and optionally ack) your wires, decrypted; --wait long-polls; --receipt signs a delivery receipt for each acked wire; attachments print as {name,mime,size} — add --save-attachments DIR to write the bytes to files, or --attachments-base64 to include them inline',
     'telegraph receipts': 'delivery receipts for wires you sent (recipient-signed proof they were fetched)',
     'telegraph listen [--wait SECONDS] [--ack false]': 'block on your mailbox and stream wires as they arrive, one JSON object per line — the agent daemon loop',
     'telegraph sent': 'your outbound history (self-sealed copies), decrypted',
@@ -152,10 +152,14 @@ async function main() {
     case 'send': {
       const [to, ...rest] = opts._;
       const text = rest.join(' ');
-      if (!to || !text) throw new Error('usage: telegraph send <TG-address|@handle> <text>');
+      const attachments = readAttachments();
+      if (!to || (!text && attachments.length === 0)) {
+        throw new Error('usage: telegraph send <TG-address|@handle> <text> [--attach FILE ...]');
+      }
       const client = loadClient();
       const sendOpts = { ...threadingOpts() };
       if (opts['idempotency-key']) sendOpts.idempotencyKey = String(opts['idempotency-key']);
+      if (attachments.length) sendOpts.attachments = attachments;
       return out(await client.send(to, text, sendOpts));
     }
     case 'reply': {
@@ -173,7 +177,7 @@ async function main() {
       const wait = opts.wait === undefined ? 0 : Number(opts.wait);
       if (!Number.isFinite(wait) || wait < 0) throw new Error('--wait must be seconds (0 or more)');
       const messages = await client.inbox({ ack: Boolean(opts.ack), wait, receipt: Boolean(opts.receipt) });
-      return out({ count: messages.length, acked: Boolean(opts.ack), messages });
+      return out({ count: messages.length, acked: Boolean(opts.ack), messages: messages.map(presentMessage) });
     }
     case 'receipts': {
       const client = loadClient();
@@ -204,7 +208,7 @@ async function main() {
           await new Promise((r) => setTimeout(r, 5000));
           continue;
         }
-        for (const m of messages) console.log(JSON.stringify(m));
+        for (const m of messages) console.log(JSON.stringify(presentMessage(m)));
       }
       return;
     }
@@ -216,7 +220,7 @@ async function main() {
     case 'sent': {
       const client = loadClient();
       const messages = await client.sent();
-      return out({ count: messages.length, messages });
+      return out({ count: messages.length, messages: messages.map(presentMessage) });
     }
     case 'pricing': {
       const client = new TelegraphClient({ server: serverUrl() });
@@ -524,6 +528,55 @@ function threadingOpts() {
   return o;
 }
 
+// A small extension→MIME map for --attach, so a sent file arrives with a
+// sensible content type. Anything unknown falls back to octet-stream; the
+// recipient always gets the exact bytes regardless. Kept inside the helper so
+// it's initialized whenever `send` calls it (main() runs before top-level
+// consts below are, so a module-level const here would be in the TDZ).
+function mimeForFile(file) {
+  const MIME_BY_EXT = {
+    '.txt': 'text/plain', '.md': 'text/markdown', '.json': 'application/json',
+    '.csv': 'text/csv', '.html': 'text/html', '.pdf': 'application/pdf',
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+    '.zip': 'application/zip', '.wav': 'audio/wav', '.mp3': 'audio/mpeg',
+  };
+  return MIME_BY_EXT[path.extname(file).toLowerCase()] ?? 'application/octet-stream';
+}
+
+// Read --attach FILE (repeatable) into [{name, mime, data:Buffer}] for send().
+function readAttachments() {
+  if (opts.attach === undefined) return [];
+  const paths = Array.isArray(opts.attach) ? opts.attach : [opts.attach];
+  return paths.map((p) => {
+    const file = String(p);
+    const data = fs.readFileSync(file); // Buffer is a Uint8Array — client accepts it
+    return { name: path.basename(file), mime: mimeForFile(file), data };
+  });
+}
+
+// Make a decrypted inbox message printable as JSON: raw attachment bytes can't
+// live in JSON, so each attachment becomes { name, mime, size } plus, on
+// --save-attachments DIR, the path it was written to, and on --attachments-base64,
+// its bytes as base64. Everything else on the message is passed through.
+function presentMessage(m) {
+  if (!m || !Array.isArray(m.attachments) || m.attachments.length === 0) return m;
+  const saveDir = opts['save-attachments'] ? String(opts['save-attachments']) : null;
+  if (saveDir) fs.mkdirSync(saveDir, { recursive: true });
+  const attachments = m.attachments.map((a, i) => {
+    const info = { name: a.name, mime: a.mime, size: a.size };
+    if (saveDir) {
+      const safe = String(a.name || `attachment-${i + 1}`).replace(/[^A-Za-z0-9._-]/g, '_');
+      const dest = path.join(saveDir, `${m.id}--${safe}`);
+      fs.writeFileSync(dest, Buffer.from(a.data));
+      info.savedPath = dest;
+    }
+    if (opts['attachments-base64']) info.dataBase64 = Buffer.from(a.data).toString('base64');
+    return info;
+  });
+  return { ...m, attachments };
+}
+
 function identityPath() {
   return opts.identity ?? process.env.TELEGRAPH_IDENTITY ?? './telegraph-identity.json';
 }
@@ -546,14 +599,21 @@ function loadClient() {
 
 function parseOpts(args) {
   const o = { _: [] };
+  // A flag repeated on one line accumulates into an array (e.g. --attach a
+  // --attach b). No existing flag is passed twice, so this is backward
+  // compatible and just enables repeatable options like --attach.
+  const set = (key, val) => {
+    if (key in o) o[key] = Array.isArray(o[key]) ? [...o[key], val] : [o[key], val];
+    else o[key] = val;
+  };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a.startsWith('--')) {
       const eq = a.indexOf('=');
       if (eq !== -1) {
-        o[a.slice(2, eq)] = a.slice(eq + 1);
+        set(a.slice(2, eq), a.slice(eq + 1));
       } else if (i + 1 < args.length && !args[i + 1].startsWith('--')) {
-        o[a.slice(2)] = args[++i];
+        set(a.slice(2), args[++i]);
       } else {
         o[a.slice(2)] = true;
       }
