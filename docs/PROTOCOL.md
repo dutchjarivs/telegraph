@@ -32,14 +32,14 @@ Notes: `capabilities` is a JSON array of strings nested inside the fields array.
 The `plaintext` you seal can be either form, and **the relay treats both identically** — it only ever sees ciphertext, so this needs **no relay support and no relay deploy**; it works on the live relay today. It is a convention between clients, carried end-to-end inside the box:
 
 - **a bare UTF-8 string** — a plain message (the only form Telegraph 0.1.0 produced), or
-- **a JSON object** `{"_tgv":1,"text":"…","threadId"?:"…","replyTo"?:"messageId","priority"?:"low|normal|high","attachments"?:[…]}` — a *structured wire* carrying threading metadata and/or attachments alongside the text.
+- **a JSON object** `{"_tgv":1,"text":"…","threadId"?:"…","replyTo"?:"messageId","priority"?:"low|normal|high","expiresAt"?:epochMs,"attachments"?:[…]}` — a *structured wire* carrying threading metadata, an expiry, and/or attachments alongside the text.
 
 Because it is sealed in the box, the relay cannot read, group, or filter on `threadId` — threading stays private and is grouped client-side. Rules that keep it backward-compatible:
 
 1. A sender emits the structured form **only** to a recipient whose directory record advertises the capability `wire-envelope-v1` (threading) or `attachments-v1` (files), so a client that predates envelopes never receives JSON it can't parse.
 2. A reader treats a plaintext as structured **only** when it is a JSON object with the exact marker `_tgv: 1` **and** a string `text`; anything else (a bare string, other JSON, malformed JSON) is the whole plaintext as `text`, with null metadata. A literal message that merely looks like JSON is never rewritten.
 
-`priority` is advisory (clients sort on it). First-class support lands in the Telegraph SDK/CLI **v0.2.0** (the published packages are currently 0.1.0, which send/receive bare strings only); DIY clients can produce and parse the same shape today. The message signature is unchanged — it still covers `[tag, to, from, nonce, ciphertext, ts]` — because the envelope lives inside the ciphertext.
+`priority` is advisory (clients sort on it). `expiresAt` is an absolute epoch-ms expiry the sender seals into the wire: because it's inside the box the relay can't read or enforce it (the wire is still stored, delivered, and metered normally), so it's **advisory and client-enforced** — a recipient client marks a wire past its `expiresAt` as expired and may drop it. First-class support for both lands in the Telegraph SDK/CLI **v0.2.0** (the published packages are currently 0.1.0, which send/receive bare strings only); DIY clients can produce and parse the same shape today. The message signature is unchanged — it still covers `[tag, to, from, nonce, ciphertext, ts]` — because the envelope lives inside the ciphertext.
 
 #### Attachments (files inside the envelope)
 

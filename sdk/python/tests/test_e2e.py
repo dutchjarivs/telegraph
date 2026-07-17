@@ -276,6 +276,62 @@ def test_python_attachment_round_trip_and_sent_history(relay):
     assert log[0].get("attachments") and log[0]["attachments"][0]["data"] == b"\x07\x07\x07"
 
 
+def test_python_sets_expiry_and_javascript_reads_it(relay):
+    """A per-message expiry sealed in Python must surface in the JavaScript SDK."""
+    py = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    js_identity = TelegraphClient.generate_identity()
+    js = TelegraphClient(relay, identity=js_identity)
+    py.register(handle="py-exp-sender")
+    js.register(handle="js-exp-reader")
+
+    future = int(time.time() * 1000) + 60_000
+    sent = py.send("@js-exp-reader", "expires soon", expires_at=future)
+    assert sent["expiresAt"] == future
+
+    out = node_client_script(relay, js_identity, """
+        const msgs = await tg.inbox();
+        process.stdout.write(JSON.stringify(msgs.map((m) => ({
+          text: m.text, expiresAt: m.expiresAt, expired: m.expired,
+        }))));
+    """)
+    assert len(out) == 1
+    assert out[0]["expiresAt"] == future
+    assert out[0]["expired"] is False
+
+
+def test_javascript_sets_expiry_and_python_reads_it(relay):
+    py_identity = TelegraphClient.generate_identity()
+    py = TelegraphClient(relay, identity=py_identity)
+    js_identity = TelegraphClient.generate_identity()
+    py.register(handle="py-exp-reader")
+    TelegraphClient(relay, identity=js_identity).register(handle="js-exp-sender")
+
+    # JS sends an already-past expiry (1) — Python must flag it expired.
+    node_client_script(relay, js_identity, """
+        await tg.send('@py-exp-reader', 'stale from js', { expiresAt: 1 });
+        process.stdout.write('{}');
+    """)
+    msgs = py.inbox()
+    assert len(msgs) == 1
+    assert msgs[0].text == "stale from js"
+    assert msgs[0].expires_at == 1
+    assert msgs[0].expired is True
+
+
+def test_python_drop_expired_filters_and_acks(relay):
+    a = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    b = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    a.register(handle="py-exp-a")
+    b.register(handle="py-exp-b")
+    a.send("@py-exp-b", "stale", expires_at=1)  # already past
+    # Default: returned, flagged expired.
+    seen = b.inbox()
+    assert len(seen) == 1 and seen[0].expired is True
+    # drop_expired filters the view; ack clears it from the mailbox.
+    assert b.inbox(ack=True, drop_expired=True) == []
+    assert b.inbox() == []
+
+
 def test_python_threading_round_trip_and_reply(relay):
     a = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
     b = TelegraphClient(relay, identity=TelegraphClient.generate_identity())

@@ -32,7 +32,7 @@ const USAGE = {
     'telegraph whoami': 'show your address and public keys',
     'telegraph directory [--q QUERY] [--limit N] [--offset N]': 'browse/search the agent directory (paged)',
     'telegraph lookup <TG-address|@handle>': 'fetch and verify one agent record',
-    'telegraph send <TG-address|@handle> <text> [--attach FILE ...] [--thread ID] [--reply-to MSGID] [--priority low|normal|high]': 'send an encrypted wire (text max 4000 chars); --attach seals a file E2E into the wire (repeatable), metered by the standard token formula; threading rides E2E, invisible to the relay',
+    'telegraph send <TG-address|@handle> <text> [--attach FILE ...] [--expires-in SECONDS] [--thread ID] [--reply-to MSGID] [--priority low|normal|high]': 'send an encrypted wire (text max 4000 chars); --attach seals a file E2E into the wire (repeatable), metered by the standard token formula; threading rides E2E, invisible to the relay',
     'telegraph reply <messageId> <text> [--priority P]': 'reply to a wire in your mailbox: continues its thread and links back to it',
     'telegraph inbox [--ack] [--wait SECONDS] [--save-attachments DIR] [--attachments-base64]': 'fetch (and optionally ack) your wires, decrypted; --wait long-polls; attachments print as {name,mime,size} — add --save-attachments DIR to write the bytes to files, or --attachments-base64 to include them inline',
     'telegraph listen [--wait SECONDS] [--ack false]': 'block on your mailbox and stream wires as they arrive, one JSON object per line',
@@ -430,6 +430,9 @@ function threadingOpts() {
   if (opts.thread !== undefined) o.threadId = String(opts.thread);
   if (opts['reply-to'] !== undefined) o.replyTo = String(opts['reply-to']);
   if (opts.priority !== undefined) o.priority = String(opts.priority);
+  // Expiry: --expires-at (absolute epoch ms) or --expires-in (relative seconds).
+  if (opts['expires-at'] !== undefined) o.expiresAt = Number(opts['expires-at']);
+  if (opts['expires-in'] !== undefined) o.ttlMs = Math.round(Number(opts['expires-in']) * 1000);
   return o;
 }
 

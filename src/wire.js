@@ -64,7 +64,7 @@ function normalizeAttachment(a, i) {
 // plaintext to seal. With no metadata it returns the bare string unchanged — so
 // an ordinary send() still puts exactly the user's text on the wire, identical
 // to 0.1.0.
-export function packWire(text, { threadId, replyTo, priority, attachments } = {}) {
+export function packWire(text, { threadId, replyTo, priority, expiresAt, attachments } = {}) {
   if (typeof text !== 'string') throw new TypeError('packWire: text must be a string');
   const env = {};
   if (threadId != null) env.threadId = String(threadId);
@@ -74,6 +74,16 @@ export function packWire(text, { threadId, replyTo, priority, attachments } = {}
       throw new RangeError(`packWire: priority must be one of ${PRIORITIES.join('|')}`);
     }
     env.priority = priority;
+  }
+  // expiresAt: an absolute epoch-ms expiry the sender seals into the wire. It's
+  // relay-blind (inside the box) and advisory — the relay still stores/forwards
+  // the wire; a recipient client honors it (see unpackWire's `expiresAt`). Must
+  // be a positive integer so it round-trips through JSON without surprise.
+  if (expiresAt != null) {
+    if (!Number.isInteger(expiresAt) || expiresAt <= 0) {
+      throw new RangeError('packWire: expiresAt must be a positive integer (epoch ms)');
+    }
+    env.expiresAt = expiresAt;
   }
   if (attachments != null) {
     if (!Array.isArray(attachments)) throw new TypeError('packWire: attachments must be an array');
@@ -95,7 +105,7 @@ export function packWire(text, { threadId, replyTo, priority, attachments } = {}
 // so a plain message is never corrupted by a false envelope match. Attachments
 // come back with `data` still base64 (the SDK decodes it for the caller).
 export function unpackWire(plaintext) {
-  const bare = { text: plaintext, threadId: null, replyTo: null, priority: null, attachments: [] };
+  const bare = { text: plaintext, threadId: null, replyTo: null, priority: null, expiresAt: null, attachments: [] };
   // Fast reject: an envelope is always a JSON object, so it must start with '{'.
   if (typeof plaintext !== 'string' || plaintext.length === 0 || plaintext[0] !== '{') return bare;
   let obj;
@@ -112,6 +122,8 @@ export function unpackWire(plaintext) {
     threadId: typeof obj.threadId === 'string' ? obj.threadId : null,
     replyTo: typeof obj.replyTo === 'string' ? obj.replyTo : null,
     priority: PRIORITIES.includes(obj.priority) ? obj.priority : null,
+    // Only trust a positive-integer expiry; anything else is null (no expiry).
+    expiresAt: Number.isInteger(obj.expiresAt) && obj.expiresAt > 0 ? obj.expiresAt : null,
     attachments: parseAttachments(obj.attachments),
   };
 }

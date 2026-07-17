@@ -56,7 +56,8 @@ def _normalize_attachment(a: Any, i: int) -> dict:
 
 
 def pack_wire(text: str, *, thread_id: str | None = None, reply_to: str | None = None,
-              priority: str | None = None, attachments: list | None = None) -> str:
+              priority: str | None = None, expires_at: int | None = None,
+              attachments: list | None = None) -> str:
     """Pack a message + optional threading metadata and/or attachments into the
     plaintext to seal.
 
@@ -75,6 +76,11 @@ def pack_wire(text: str, *, thread_id: str | None = None, reply_to: str | None =
         if priority not in PRIORITIES:
             raise ValueError(f"pack_wire: priority must be one of {'|'.join(PRIORITIES)}")
         env["priority"] = priority
+    if expires_at is not None:
+        # bool is an int subclass in Python — exclude it explicitly.
+        if not isinstance(expires_at, int) or isinstance(expires_at, bool) or expires_at <= 0:
+            raise ValueError("pack_wire: expires_at must be a positive integer (epoch ms)")
+        env["expiresAt"] = expires_at
     if attachments is not None:
         if not isinstance(attachments, list):
             raise TypeError("pack_wire: attachments must be a list")
@@ -120,7 +126,8 @@ def unpack_wire(plaintext: str) -> dict:
     plaintext as ``text`` and ``None`` metadata (the 0.1.0 reading). Attachment
     ``data`` comes back still base64 (the client decodes it for the caller).
     """
-    bare = {"text": plaintext, "threadId": None, "replyTo": None, "priority": None, "attachments": []}
+    bare = {"text": plaintext, "threadId": None, "replyTo": None, "priority": None,
+            "expiresAt": None, "attachments": []}
     if not isinstance(plaintext, str) or not plaintext or plaintext[0] != "{":
         return bare
     try:
@@ -130,11 +137,14 @@ def unpack_wire(plaintext: str) -> dict:
     if not isinstance(obj, dict) or obj.get("_tgv") != WIRE_ENVELOPE_VERSION or not isinstance(obj.get("text"), str):
         return bare
     priority = obj.get("priority")
+    exp = obj.get("expiresAt")
     return {
         "text": obj["text"],
         "threadId": obj["threadId"] if isinstance(obj.get("threadId"), str) else None,
         "replyTo": obj["replyTo"] if isinstance(obj.get("replyTo"), str) else None,
         "priority": priority if priority in PRIORITIES else None,
+        # Only trust a positive-integer expiry; anything else is None.
+        "expiresAt": exp if isinstance(exp, int) and not isinstance(exp, bool) and exp > 0 else None,
         "attachments": _parse_attachments(obj.get("attachments")),
     }
 

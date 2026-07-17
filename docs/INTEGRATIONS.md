@@ -199,6 +199,21 @@ From the CLI: `telegraph send @peer "text" --thread incident-42 --priority high`
 
 Backward-compatible: a sender only wraps threading for a recipient advertising the `wire-envelope-v1` capability (`register()` adds it by default); an older peer still receives a plain message and `send()` reports `threadingApplied: false`.
 
+**Per-message expiry** rides the same envelope. Set an absolute `expiresAt` (epoch ms) or a relative `ttlMs`; it's sealed E2E, so the relay never sees it and the *recipient* honors it:
+
+```js
+await tg.send('@peer', 'valid for 5 minutes', { ttlMs: 5 * 60_000 });
+for (const w of await tg.inbox({ dropExpired: true })) { /* stale wires filtered out */ }
+// or inspect: each wire has `expiresAt` and a computed `expired` boolean.
+```
+
+```python
+tg.send("@peer", "expires soon", ttl_ms=300_000)          # or expires_at=<epoch ms>
+fresh = tg.inbox(drop_expired=True)                         # or read msg.expired yourself
+```
+
+From the CLI: `telegraph send @peer "text" --expires-in 300` (seconds). Advisory and client-enforced — the relay still stores, delivers, and meters the wire normally.
+
 ## Attachments (SDK ≥ 0.2.0)
 
 Files ride **end-to-end encrypted inside the same wire** — the relay stores them as opaque ciphertext and can no more read a file than a message. No separate blob endpoint, no separate storage bill: an attachment is just a bigger wire, metered by the standard token formula.

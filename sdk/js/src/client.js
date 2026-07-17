@@ -145,7 +145,19 @@ export class TelegraphClient {
     if (typeof text !== 'string') {
       throw new TelegraphError('client_bad_argument', 'send(to, text): text must be a string');
     }
-    const { threadId, replyTo, priority, attachments } = opts;
+    const { threadId, replyTo, priority, attachments, ttlMs } = opts;
+    let { expiresAt } = opts;
+    // ttlMs is a convenience: a relative lifetime the SDK turns into an absolute
+    // expiresAt (epoch ms). expiresAt wins if both are given.
+    if (expiresAt == null && ttlMs != null) {
+      if (!Number.isInteger(ttlMs) || ttlMs <= 0) {
+        throw new TelegraphError('client_bad_argument', 'ttlMs must be a positive integer (milliseconds)');
+      }
+      expiresAt = Date.now() + ttlMs;
+    }
+    if (expiresAt != null && (!Number.isInteger(expiresAt) || expiresAt <= 0)) {
+      throw new TelegraphError('client_bad_argument', 'expiresAt must be a positive integer (epoch ms)');
+    }
     const hasAttachments = attachments != null &&
       (Array.isArray(attachments) ? attachments.length > 0 : true);
     // A wire must carry *something* — text or at least one attachment.
@@ -177,14 +189,16 @@ export class TelegraphClient {
         `recipient does not advertise ${ATTACHMENTS_CAPABILITY}`,
       );
     }
-    const wantsThreading = threadId != null || replyTo != null || priority != null;
+    // Threading-class metadata (threadId/replyTo/priority/expiresAt) all ride the
+    // envelope and are gated on the same wire-envelope-v1 capability.
+    const wantsThreading = threadId != null || replyTo != null || priority != null || expiresAt != null;
     const applyThreading = wantsThreading && caps.includes(WIRE_ENVELOPE_CAPABILITY);
     // Any structured content (threading or attachments) travels as an envelope;
     // a plain text-only send with a bare-string recipient stays byte-for-byte
     // identical to 0.1.0.
     const structured = applyThreading || hasAttachments;
     const wireOpts = {};
-    if (applyThreading) Object.assign(wireOpts, { threadId, replyTo, priority });
+    if (applyThreading) Object.assign(wireOpts, { threadId, replyTo, priority, expiresAt });
     if (hasAttachments) wireOpts.attachments = encodedAttachments;
     // Pack the plaintext once and seal the same bytes to the recipient and to
     // the sender's own copy, so the sent log carries the same threading/files.
@@ -219,6 +233,7 @@ export class TelegraphClient {
       threadId: applyThreading ? (threadId ?? null) : null,
       replyTo: applyThreading ? (replyTo ?? null) : null,
       priority: applyThreading ? (priority ?? null) : null,
+      expiresAt: applyThreading ? (expiresAt ?? null) : null,
       threadingApplied: applyThreading,
       // How many attachments actually rode this wire (0 for a plain message).
       attachments: hasAttachments ? encodedAttachments.length : 0,
@@ -286,17 +301,22 @@ export class TelegraphClient {
   //   wait: seconds to hold the connection open if the mailbox is empty
   //         (long-poll). 0 (default) is a plain non-blocking read. A timeout
   //         is not an error — it comes back empty and you poll again.
-  async inbox({ ack = false, wait = 0 } = {}) {
+  //   dropExpired: skip wires whose sender-set expiresAt has passed (default
+  //         false — expired wires are still returned, flagged `expired: true`, so
+  //         nothing is hidden silently; set true to filter them out for you).
+  async inbox({ ack = false, wait = 0, dropExpired = false } = {}) {
     this.#requireIdentity();
     const path = wait > 0 ? `/v1/inbox?wait=${encodeURIComponent(wait)}` : '/v1/inbox';
     const r = await this.#req('GET', path, null, { signed: true });
-    const messages = asArray(r.messages).map((m) => {
+    const now = Date.now();
+    let messages = asArray(r.messages).map((m) => {
       const sender = m.sender;
       let text = null;
       let verified = false;
       let threadId = null;
       let replyTo = null;
       let priority = null;
+      let expiresAt = null;
       let attachments = [];
       if (sender && sender.address === m.from && verifyAgentRecord(sender)) {
         const sigOk = verifyFields(
@@ -314,6 +334,7 @@ export class TelegraphClient {
           threadId = env.threadId;
           replyTo = env.replyTo;
           priority = env.priority;
+          expiresAt = env.expiresAt;
           attachments = decodeAttachments(env.attachments);
         }
       }
@@ -325,6 +346,10 @@ export class TelegraphClient {
         receivedAt: m.receivedAt,
         text,
         verified,
+        // Sender-set expiry (epoch ms, null if none) and whether it has passed.
+        // Advisory and E2E: the relay never saw it — the client honors it.
+        expiresAt,
+        expired: expiresAt != null && expiresAt < now,
         // Decrypted attachments (empty on a plain wire): [{ name, mime, size, data:Uint8Array }].
         attachments,
         // Threading metadata, sealed E2E by the sender (null on a plain wire).
@@ -338,9 +363,13 @@ export class TelegraphClient {
         envelope: { to: m.to, from: m.from, nonce: m.nonce, ciphertext: m.ciphertext, ts: m.ts, sig: m.sig },
       };
     });
+    // Ack every wire actually fetched (expired ones included, so dropExpired
+    // still cleans them out of the mailbox), then filter the view returned to
+    // the caller. Order matters: filter after collecting ack ids.
     if (ack && messages.length) {
       await this.ack(messages.map((m) => m.id));
     }
+    if (dropExpired) messages = messages.filter((m) => !m.expired);
     return messages;
   }
 
@@ -370,7 +399,7 @@ export class TelegraphClient {
       const plaintext = decrypt(m.nonce, m.ciphertext, this.identity.boxPublicKey, this.identity.boxSecretKey);
       const env = plaintext !== null
         ? unpackWire(plaintext)
-        : { text: null, threadId: null, replyTo: null, priority: null, attachments: [] };
+        : { text: null, threadId: null, replyTo: null, priority: null, expiresAt: null, attachments: [] };
       return {
         id: m.id,
         to: m.to,
@@ -381,6 +410,7 @@ export class TelegraphClient {
         threadId: env.threadId,
         replyTo: env.replyTo,
         priority: env.priority,
+        expiresAt: env.expiresAt,
         attachments: decodeAttachments(env.attachments),
       };
     });

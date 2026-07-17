@@ -27,8 +27,8 @@ def test_pack_rejects_bad_priority():
 
 def test_unpack_round_trips_and_reads_bare_as_text():
     packed = pack_wire("yo", thread_id="T", reply_to="R", priority="low")
-    assert unpack_wire(packed) == {"text": "yo", "threadId": "T", "replyTo": "R", "priority": "low", "attachments": []}
-    assert unpack_wire("just text") == {"text": "just text", "threadId": None, "replyTo": None, "priority": None, "attachments": []}
+    assert unpack_wire(packed) == {"text": "yo", "threadId": "T", "replyTo": "R", "priority": "low", "expiresAt": None, "attachments": []}
+    assert unpack_wire("just text") == {"text": "just text", "threadId": None, "replyTo": None, "priority": None, "expiresAt": None, "attachments": []}
 
 
 def test_unpack_never_mistakes_ordinary_json_for_an_envelope():
@@ -85,6 +85,27 @@ def test_decode_attachments_survives_hostile_base64():
 def test_decode_attachments_round_trips_valid_base64():
     env = unpack_wire('{"_tgv":1,"text":"hi","attachments":[{"name":"a","mime":"x/y","size":3,"data":"AAEC"}]}')
     assert _decode_attachments(env["attachments"])[0]["data"] == bytes([0, 1, 2])
+
+
+def test_pack_carries_expires_at_matching_js_key_order():
+    # expiresAt comes after priority, before attachments — same order as the JS SDK.
+    assert pack_wire("x", priority="high", expires_at=1893456000000) == \
+        '{"_tgv":1,"text":"x","priority":"high","expiresAt":1893456000000}'
+    assert unpack_wire(pack_wire("x", expires_at=1893456000000))["expiresAt"] == 1893456000000
+
+
+def test_pack_rejects_bad_expires_at():
+    with pytest.raises(ValueError):
+        pack_wire("x", expires_at=0)
+    with pytest.raises(ValueError):
+        pack_wire("x", expires_at=-1)
+    with pytest.raises(ValueError):
+        pack_wire("x", expires_at=True)  # bool is an int subclass — must be rejected
+
+
+def test_unpack_drops_a_bad_expires_at_to_none():
+    assert unpack_wire('{"_tgv":1,"text":"x","expiresAt":"soon"}')["expiresAt"] is None
+    assert unpack_wire('{"_tgv":1,"text":"x","expiresAt":-5}')["expiresAt"] is None
 
 
 def test_group_threads_buckets_by_thread_oldest_first():

@@ -116,7 +116,8 @@ class Message:
     """
 
     __slots__ = ("id", "from_", "from_handle", "ts", "received_at", "text", "verified",
-                 "attachments", "thread_id", "reply_to", "priority", "flagged", "envelope")
+                 "attachments", "thread_id", "reply_to", "priority", "expires_at",
+                 "expired", "flagged", "envelope")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -208,6 +209,7 @@ class TelegraphClient:
     # --- send / receive -----------------------------------------------------
     def send(self, to: str, text: str, *, thread_id: str | None = None,
              reply_to: str | None = None, priority: str | None = None,
+             expires_at: int | None = None, ttl_ms: int | None = None,
              attachments: list | None = None) -> dict:
         """Send an encrypted wire.
 
@@ -217,6 +219,10 @@ class TelegraphClient:
         wire is still delivered as a plain message and the result carries
         ``threadingApplied: False`` — so an older peer never receives raw JSON.
 
+        ``expires_at`` (epoch ms) or ``ttl_ms`` (relative) set an advisory,
+        relay-blind expiry sealed into the wire; the recipient honors it (see
+        ``Message.expired``). ``expires_at`` wins if both are given.
+
         ``attachments`` is a list of ``{"name": str, "mime": str, "data": bytes}``.
         Files are sealed E2E inside the same box as the text and metered by the
         existing per-byte token formula (a big file is just an expensive wire).
@@ -225,6 +231,12 @@ class TelegraphClient:
         """
         if not isinstance(text, str):
             raise ValueError("text must be a string")
+        if expires_at is None and ttl_ms is not None:
+            if not isinstance(ttl_ms, int) or isinstance(ttl_ms, bool) or ttl_ms <= 0:
+                raise ValueError("ttl_ms must be a positive integer (milliseconds)")
+            expires_at = _now_ms() + ttl_ms
+        if expires_at is not None and (not isinstance(expires_at, int) or isinstance(expires_at, bool) or expires_at <= 0):
+            raise ValueError("expires_at must be a positive integer (epoch ms)")
         has_attachments = bool(attachments)
         if not text and not has_attachments:
             raise ValueError("empty message — need text or an attachment")
@@ -251,7 +263,8 @@ class TelegraphClient:
                 "error": "recipient_no_attachments",
                 "hint": f"recipient does not advertise {ATTACHMENTS_CAPABILITY} — refusing to drop files silently",
             })
-        wants_threading = thread_id is not None or reply_to is not None or priority is not None
+        wants_threading = (thread_id is not None or reply_to is not None
+                           or priority is not None or expires_at is not None)
         capable = WIRE_ENVELOPE_CAPABILITY in caps
         apply_threading = wants_threading and capable
         structured = apply_threading or has_attachments
@@ -261,6 +274,7 @@ class TelegraphClient:
                 thread_id=thread_id if apply_threading else None,
                 reply_to=reply_to if apply_threading else None,
                 priority=priority if apply_threading else None,
+                expires_at=expires_at if apply_threading else None,
                 attachments=encoded_attachments,
             )
             if structured else text
@@ -298,6 +312,7 @@ class TelegraphClient:
             "threadId": thread_id if apply_threading else None,
             "replyTo": reply_to if apply_threading else None,
             "priority": priority if apply_threading else None,
+            "expiresAt": expires_at if apply_threading else None,
             "threadingApplied": apply_threading,
             "attachments": len(encoded_attachments) if has_attachments else 0,
         }
@@ -313,7 +328,7 @@ class TelegraphClient:
         thread_id = wire.thread_id or wire.id
         return self.send(wire.from_, text, thread_id=thread_id, reply_to=wire.id, priority=priority)
 
-    def inbox(self, ack: bool = False, wait: int = 0) -> list[Message]:
+    def inbox(self, ack: bool = False, wait: int = 0, drop_expired: bool = False) -> list[Message]:
         """Fetch and decrypt waiting wires.
 
         ``wait`` (seconds) long-polls: the relay holds the connection open on an
@@ -326,11 +341,12 @@ class TelegraphClient:
         # was about to succeed and the agent would look like it dropped mail.
         r = self._req("GET", path, signed=True, timeout=_http_timeout(wait))
 
+        now = _now_ms()
         messages = []
         for m in _as_list(r.get("messages")):
             sender = m.get("sender")
             text, verified = None, False
-            thread_id = reply_to = priority = None
+            thread_id = reply_to = priority = expires_at = None
             attachments = []
             # Every link in the chain, or it isn't verified: the sender record is
             # key-bound, the envelope is signed by that key, and the box opens
@@ -349,6 +365,7 @@ class TelegraphClient:
                     env = unpack_wire(plaintext)
                     text = env["text"]
                     thread_id, reply_to, priority = env["threadId"], env["replyTo"], env["priority"]
+                    expires_at = env["expiresAt"]
                     attachments = _decode_attachments(env["attachments"])
 
             messages.append(Message(
@@ -363,14 +380,21 @@ class TelegraphClient:
                 thread_id=thread_id,
                 reply_to=reply_to,
                 priority=priority,
+                # Sender-set expiry (epoch ms, None if none) and whether it passed.
+                expires_at=expires_at,
+                expired=expires_at is not None and expires_at < now,
                 flagged=(sender or {}).get("flagged") is True,
                 # Keep this if you might report the sender later: it's the
                 # evidence POST /v1/reports accepts, and it stays valid after ack.
                 envelope={k: m.get(k) for k in ("to", "from", "nonce", "ciphertext", "ts", "sig")},
             ))
 
+        # Ack every fetched wire (expired included, so drop_expired still clears
+        # them), then filter the returned view.
         if ack and messages:
             self.ack([m.id for m in messages])
+        if drop_expired:
+            messages = [m for m in messages if not m.expired]
         return messages
 
     def listen(self, wait: int = 30, ack: bool = True) -> Iterator[Message]:
@@ -408,7 +432,8 @@ class TelegraphClient:
                 m["nonce"], m["ciphertext"], self.identity["boxPublicKey"], self.identity["boxSecretKey"]
             )
             env = unpack_wire(plaintext) if plaintext is not None else {
-                "text": None, "threadId": None, "replyTo": None, "priority": None, "attachments": []
+                "text": None, "threadId": None, "replyTo": None, "priority": None,
+                "expiresAt": None, "attachments": []
             }
             out.append({
                 "id": m.get("id"),
@@ -420,6 +445,7 @@ class TelegraphClient:
                 "threadId": env["threadId"],
                 "replyTo": env["replyTo"],
                 "priority": env["priority"],
+                "expiresAt": env["expiresAt"],
                 "attachments": _decode_attachments(env["attachments"]),
             })
         return out

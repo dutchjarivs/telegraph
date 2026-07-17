@@ -123,8 +123,15 @@ export class TelegraphClient {
   // the box — the relay never sees it. Applied only when the recipient advertises
   // WIRE_ENVELOPE_CAPABILITY; otherwise the wire is still delivered as a plain
   // message and the result flags threadingApplied: false (an old peer never gets JSON).
-  async send(to, text, { idempotencyKey, threadId, replyTo, priority, attachments } = {}) {
+  async send(to, text, { idempotencyKey, threadId, replyTo, priority, expiresAt, ttlMs, attachments } = {}) {
     if (typeof text !== 'string') throw new Error('text must be a string');
+    if (expiresAt == null && ttlMs != null) {
+      if (!Number.isInteger(ttlMs) || ttlMs <= 0) throw new Error('ttlMs must be a positive integer (milliseconds)');
+      expiresAt = Date.now() + ttlMs;
+    }
+    if (expiresAt != null && (!Number.isInteger(expiresAt) || expiresAt <= 0)) {
+      throw new Error('expiresAt must be a positive integer (epoch ms)');
+    }
     const hasAttachments = attachments != null &&
       (Array.isArray(attachments) ? attachments.length > 0 : true);
     if (text.length === 0 && !hasAttachments) throw new Error('empty message — need text or an attachment');
@@ -141,11 +148,11 @@ export class TelegraphClient {
     if (hasAttachments && !caps.includes(ATTACHMENTS_CAPABILITY)) {
       throw new Error(`recipient does not advertise ${ATTACHMENTS_CAPABILITY} — refusing to drop files silently`);
     }
-    const wantsThreading = threadId != null || replyTo != null || priority != null;
+    const wantsThreading = threadId != null || replyTo != null || priority != null || expiresAt != null;
     const applyThreading = wantsThreading && caps.includes(WIRE_ENVELOPE_CAPABILITY);
     const structured = applyThreading || hasAttachments;
     const wireOpts = {};
-    if (applyThreading) Object.assign(wireOpts, { threadId, replyTo, priority });
+    if (applyThreading) Object.assign(wireOpts, { threadId, replyTo, priority, expiresAt });
     if (hasAttachments) wireOpts.attachments = encodedAttachments;
     const plaintext = structured ? packWire(text, wireOpts) : text;
     const { nonce, ciphertext } = encrypt(plaintext, recipient.boxPublicKey, this.identity.boxSecretKey);
@@ -180,6 +187,7 @@ export class TelegraphClient {
       threadId: applyThreading ? (threadId ?? null) : null,
       replyTo: applyThreading ? (replyTo ?? null) : null,
       priority: applyThreading ? (priority ?? null) : null,
+      expiresAt: applyThreading ? (expiresAt ?? null) : null,
       threadingApplied: applyThreading,
       attachments: hasAttachments ? encodedAttachments.length : 0,
       ...(wantsThreading && !applyThreading ? { threadingDropped: `recipient does not advertise ${WIRE_ENVELOPE_CAPABILITY}` } : {}),
@@ -205,16 +213,18 @@ export class TelegraphClient {
   // A timeout is not an error — it just comes back empty, and you poll again.
   // receipt: when acking, also send a signed delivery receipt for each wire so
   // the original sender can later prove (via receipts()) that you fetched it.
-  async inbox({ ack = false, wait = 0, receipt = false } = {}) {
+  async inbox({ ack = false, wait = 0, receipt = false, dropExpired = false } = {}) {
     const path = wait > 0 ? `/v1/inbox?wait=${encodeURIComponent(wait)}` : '/v1/inbox';
     const r = await this.#req('GET', path, null, { signed: true });
-    const messages = (r.messages ?? []).map((m) => {
+    const now = Date.now();
+    let messages = (r.messages ?? []).map((m) => {
       const sender = m.sender;
       let text = null;
       let verified = false;
       let threadId = null;
       let replyTo = null;
       let priority = null;
+      let expiresAt = null;
       let attachments = [];
       if (sender && sender.address === m.from && verifyAgentRecord(sender)) {
         const sigOk = verifyFields(
@@ -230,6 +240,7 @@ export class TelegraphClient {
           threadId = env.threadId;
           replyTo = env.replyTo;
           priority = env.priority;
+          expiresAt = env.expiresAt;
           attachments = decodeAttachments(env.attachments);
         }
       }
@@ -245,6 +256,9 @@ export class TelegraphClient {
         threadId,
         replyTo,
         priority,
+        // Sender-set expiry (epoch ms, null if none) and whether it has passed.
+        expiresAt,
+        expired: expiresAt != null && expiresAt < now,
         // Sender flagged by the relay's abuse-report system — treat with care.
         flagged: sender?.flagged === true,
         // The raw signed wire. Keep it if you might report this sender later:
@@ -256,6 +270,7 @@ export class TelegraphClient {
       const receipts = receipt ? messages.map((m) => this.#makeReceipt(m.id, m.from)) : undefined;
       await this.ack(messages.map((m) => m.id), { receipts });
     }
+    if (dropExpired) messages = messages.filter((m) => !m.expired);
     return messages;
   }
 
@@ -324,7 +339,7 @@ export class TelegraphClient {
     const r = await this.#req('GET', '/v1/sent', null, { signed: true });
     return (r.messages ?? []).map((m) => {
       const plaintext = decrypt(m.nonce, m.ciphertext, this.identity.boxPublicKey, this.identity.boxSecretKey);
-      const env = plaintext !== null ? unpackWire(plaintext) : { text: null, threadId: null, replyTo: null, priority: null, attachments: [] };
+      const env = plaintext !== null ? unpackWire(plaintext) : { text: null, threadId: null, replyTo: null, priority: null, expiresAt: null, attachments: [] };
       return {
         id: m.id,
         to: m.to,
@@ -335,6 +350,7 @@ export class TelegraphClient {
         threadId: env.threadId,
         replyTo: env.replyTo,
         priority: env.priority,
+        expiresAt: env.expiresAt,
         attachments: decodeAttachments(env.attachments),
       };
     });

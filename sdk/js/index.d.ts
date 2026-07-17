@@ -75,6 +75,10 @@ export interface InboxMessage {
   replyTo: string | null;
   /** Advisory priority; null when unset. */
   priority: Priority | null;
+  /** Sender-set expiry (epoch ms), sealed E2E; null when none. */
+  expiresAt: number | null;
+  /** True when expiresAt is set and has passed (advisory; the relay never saw it). */
+  expired: boolean;
   flagged: boolean;
   envelope: Envelope;
 }
@@ -92,6 +96,8 @@ export interface SendResult {
   threadId: string | null;
   replyTo: string | null;
   priority: Priority | null;
+  /** Expiry actually sealed onto the wire (null when none/dropped). */
+  expiresAt: number | null;
   /** false when threading was requested but the recipient can't read it. */
   threadingApplied: boolean;
   /** Count of attachments actually sent (0 for a plain wire). */
@@ -110,6 +116,7 @@ export interface SentMessage {
   threadId: string | null;
   replyTo: string | null;
   priority: Priority | null;
+  expiresAt: number | null;
   attachments: Attachment[];
 }
 
@@ -149,6 +156,10 @@ export interface SendOptions {
   replyTo?: string;
   /** Advisory priority for the recipient to sort on. */
   priority?: Priority;
+  /** Absolute expiry (epoch ms), sealed E2E — advisory, honored by the recipient. */
+  expiresAt?: number;
+  /** Relative lifetime in ms; the SDK converts it to an absolute expiresAt. */
+  ttlMs?: number;
   /** Files to seal into the wire. Requires the recipient to advertise
    * attachments-v1, else send() throws client_recipient_no_attachments. */
   attachments?: OutboundAttachment[];
@@ -188,7 +199,7 @@ export class TelegraphClient {
   send(to: string, text: string, opts?: SendOptions): Promise<SendResult>;
   /** Reply to an inbox wire: continues its thread and sets replyTo to its id. */
   reply(wire: InboxMessage, text: string, opts?: SendOptions): Promise<SendResult>;
-  inbox(opts?: { ack?: boolean; wait?: number }): Promise<InboxMessage[]>;
+  inbox(opts?: { ack?: boolean; wait?: number; dropExpired?: boolean }): Promise<InboxMessage[]>;
   /** Long-poll loop: yields each wire as it arrives, forever. Break to stop. */
   listen(opts?: { wait?: number; ack?: boolean }): AsyncGenerator<InboxMessage, void, unknown>;
   ack(ids: string[]): Promise<{ ok: boolean; removed: number; remaining: number }>;
@@ -246,13 +257,14 @@ export interface PackWireOptions {
   threadId?: string;
   replyTo?: string;
   priority?: Priority;
+  expiresAt?: number;
   attachments?: WireAttachmentInput[];
 }
 
 /** Pack text + optional threading/attachments into the plaintext to seal (bare string when no metadata). */
 export function packWire(text: string, opts?: PackWireOptions): string;
 /** Parse a decrypted plaintext into { text, threadId, replyTo, priority, attachments }. */
-export function unpackWire(plaintext: string): { text: string; threadId: string | null; replyTo: string | null; priority: Priority | null; attachments: WireAttachment[] };
+export function unpackWire(plaintext: string): { text: string; threadId: string | null; replyTo: string | null; priority: Priority | null; expiresAt: number | null; attachments: WireAttachment[] };
 /** Group wires into conversations by threadId (or own id), client-side. */
 export function groupThreads<T extends { id: string; ts?: number; threadId?: string | null }>(messages: T[]): Thread<T>[];
 export const PRIORITIES: readonly Priority[];
