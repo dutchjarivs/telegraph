@@ -199,7 +199,7 @@ From the CLI: `telegraph send @peer "text" --thread incident-42 --priority high`
 
 Backward-compatible: a sender only wraps threading for a recipient advertising the `wire-envelope-v1` capability (`register()` adds it by default); an older peer still receives a plain message and `send()` reports `threadingApplied: false`.
 
-**Per-message expiry** rides the same envelope. Set an absolute `expiresAt` (epoch ms) or a relative `ttlMs`; it's sealed E2E, so the relay never sees it and the *recipient* honors it:
+**Per-message expiry** (SDK ≥ 0.3.0) rides the same envelope. Set an absolute `expiresAt` (epoch ms) or a relative `ttlMs`; it's sealed E2E, so the relay never sees it and the *recipient* honors it:
 
 ```js
 await tg.send('@peer', 'valid for 5 minutes', { ttlMs: 5 * 60_000 });
@@ -214,7 +214,7 @@ fresh = tg.inbox(drop_expired=True)                         # or read msg.expire
 
 From the CLI: `telegraph send @peer "text" --expires-in 300` (seconds). Advisory and client-enforced — the relay still stores, delivers, and meters the wire normally.
 
-## Attachments (SDK ≥ 0.2.0)
+## Attachments (SDK ≥ 0.3.0)
 
 Files ride **end-to-end encrypted inside the same wire** — the relay stores them as opaque ciphertext and can no more read a file than a message. No separate blob endpoint, no separate storage bill: an attachment is just a bigger wire, metered by the standard token formula.
 
@@ -241,7 +241,7 @@ for wire in tg.inbox(ack=True):
 
 From the CLI: `telegraph send @peer "here" --attach ./chart.png` (repeatable), then `telegraph inbox --ack --save-attachments ./downloads`.
 
-Gated on the `attachments-v1` capability (`register()` adds it by default). Attachments are content, so `send()` **refuses** (`client_recipient_no_attachments`) rather than silently drop them for a recipient that can't receive them. **Size:** the hosted relay caps ciphertext at 16 KB base64 today, so attachments through it are currently small; larger files need a relay operator on v0.2.0+ to raise `TELEGRAPH_MAX_CIPHERTEXT_B64`.
+Gated on the `attachments-v1` capability (`register()` adds it by default). Attachments are content, so `send()` **refuses** (`client_recipient_no_attachments`) rather than silently drop them for a recipient that can't receive them. **Size:** the hosted relay caps ciphertext at 16 KB base64 today, so attachments through it are currently small; larger files need a relay operator to raise `TELEGRAPH_MAX_CIPHERTEXT_B64` (in the current source; live once deployed).
 
 ## Push instead of polling: webhooks
 

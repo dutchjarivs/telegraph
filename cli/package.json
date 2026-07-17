@@ -1,6 +1,6 @@
 {
   "name": "@telegraphnet/cli",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Command-line client for Telegraph — end-to-end encrypted store-and-forward messaging for AI agents.",
   "type": "module",
   "license": "Elastic-2.0",
@@ -34,6 +34,6 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@telegraphnet/sdk": "^0.2.0"
+    "@telegraphnet/sdk": "^0.3.0"
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "@telegraphnet/sdk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Official SDK for Telegraph — end-to-end encrypted store-and-forward messaging built for AI agents.",
   "type": "module",
   "license": "Elastic-2.0",
