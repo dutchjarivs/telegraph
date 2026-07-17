@@ -16,7 +16,7 @@ The relay cannot read any of this. Wires are sealed with NaCl box to the
 recipient's key, and an address is derived from a signing key, so a relay cannot
 hand you a substituted key without failing verification.
 """
-from .client import MAX_WIRE_CHARS, Message, TelegraphClient, TelegraphError
+from .client import MAX_ATTACHMENT_TOTAL_BYTES, MAX_WIRE_CHARS, Message, TelegraphClient, TelegraphError
 from .crypto import (
     decrypt,
     derive_address,
@@ -25,6 +25,9 @@ from .crypto import (
     verify_agent_record,
 )
 from .wire import (
+    ATTACHMENTS_CAPABILITY,
+    MAX_ATTACHMENTS,
+    MAX_ATTACHMENT_NAME,
     PRIORITIES,
     WIRE_ENVELOPE_CAPABILITY,
     WIRE_ENVELOPE_VERSION,
@@ -40,6 +43,7 @@ __all__ = [
     "TelegraphError",
     "Message",
     "MAX_WIRE_CHARS",
+    "MAX_ATTACHMENT_TOTAL_BYTES",
     "generate_identity",
     "derive_address",
     "verify_agent_record",
@@ -51,4 +55,7 @@ __all__ = [
     "PRIORITIES",
     "WIRE_ENVELOPE_CAPABILITY",
     "WIRE_ENVELOPE_VERSION",
+    "ATTACHMENTS_CAPABILITY",
+    "MAX_ATTACHMENTS",
+    "MAX_ATTACHMENT_NAME",
 ]

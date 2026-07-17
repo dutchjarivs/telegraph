@@ -17,10 +17,58 @@ import urllib.request
 from typing import Any, Iterator
 
 from . import crypto
-from .wire import pack_wire, unpack_wire, PRIORITIES, WIRE_ENVELOPE_CAPABILITY
+from .wire import (
+    pack_wire,
+    unpack_wire,
+    PRIORITIES,
+    WIRE_ENVELOPE_CAPABILITY,
+    ATTACHMENTS_CAPABILITY,
+    MAX_ATTACHMENTS,
+)
 
 MAX_WIRE_CHARS = 4000
+# Friendly preflight ceiling on total attachment bytes per wire; the relay's
+# ciphertext cap is the real authority (and big wires cost tokens to match).
+MAX_ATTACHMENT_TOTAL_BYTES = 16 * 1024 * 1024
 _TG_ADDRESS = re.compile(r"^TG-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$")
+
+
+def _encode_attachments(attachments: list) -> list[dict]:
+    """caller [{name?, mime?, data: bytes}] → on-wire base64 shape."""
+    if not isinstance(attachments, list):
+        raise TypeError("attachments must be a list")
+    if len(attachments) > MAX_ATTACHMENTS:
+        raise ValueError(f"at most {MAX_ATTACHMENTS} attachments per wire")
+    total = 0
+    out = []
+    for i, a in enumerate(attachments):
+        if not isinstance(a, dict):
+            raise TypeError(f"attachment {i} must be a dict")
+        data = a.get("data")
+        if not isinstance(data, (bytes, bytearray)):
+            raise TypeError(f"attachment {i} data must be bytes")
+        total += len(data)
+        out.append({
+            "name": None if a.get("name") is None else str(a["name"]),
+            "mime": None if a.get("mime") is None else str(a["mime"]),
+            "size": len(data),
+            "data": crypto.to_b64(bytes(data)),
+        })
+    if total > MAX_ATTACHMENT_TOTAL_BYTES:
+        raise ValueError(
+            f"attachments total {total} bytes exceeds the {MAX_ATTACHMENT_TOTAL_BYTES}-byte client limit"
+        )
+    return out
+
+
+def _decode_attachments(raw: list) -> list[dict]:
+    """base64 wire attachments → caller bytes (``data`` decoded)."""
+    if not isinstance(raw, list):
+        return []
+    return [
+        {"name": a["name"], "mime": a["mime"], "size": a["size"], "data": crypto.from_b64(a["data"])}
+        for a in raw
+    ]
 
 
 class TelegraphError(Exception):
@@ -46,7 +94,7 @@ class Message:
     """
 
     __slots__ = ("id", "from_", "from_handle", "ts", "received_at", "text", "verified",
-                 "thread_id", "reply_to", "priority", "flagged", "envelope")
+                 "attachments", "thread_id", "reply_to", "priority", "flagged", "envelope")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -90,12 +138,16 @@ class TelegraphClient:
 
     # --- directory ----------------------------------------------------------
     def register(self, handle: str, bio: str = "", capabilities: list[str] | None = None,
-                 threading: bool = True) -> dict:
+                 threading: bool = True, attachments: bool = True) -> dict:
         # threading (default on): advertise WIRE_ENVELOPE_CAPABILITY so peers on a
         # current SDK send you structured wires (thread_id/reply_to/priority).
+        # attachments (default on): advertise ATTACHMENTS_CAPABILITY so peers may
+        # send you files sealed E2E in the same box.
         caps = list(capabilities or [])
         if threading and WIRE_ENVELOPE_CAPABILITY not in caps:
             caps.append(WIRE_ENVELOPE_CAPABILITY)
+        if attachments and ATTACHMENTS_CAPABILITY not in caps:
+            caps.append(ATTACHMENTS_CAPABILITY)
         ts = _now_ms()
         sig = crypto.sign_fields(
             crypto.register_fields(
@@ -133,7 +185,8 @@ class TelegraphClient:
 
     # --- send / receive -----------------------------------------------------
     def send(self, to: str, text: str, *, thread_id: str | None = None,
-             reply_to: str | None = None, priority: str | None = None) -> dict:
+             reply_to: str | None = None, priority: str | None = None,
+             attachments: list | None = None) -> dict:
         """Send an encrypted wire.
 
         ``thread_id`` / ``reply_to`` / ``priority`` are conversation metadata
@@ -141,13 +194,23 @@ class TelegraphClient:
         only when the recipient advertises WIRE_ENVELOPE_CAPABILITY; otherwise the
         wire is still delivered as a plain message and the result carries
         ``threadingApplied: False`` — so an older peer never receives raw JSON.
+
+        ``attachments`` is a list of ``{"name": str, "mime": str, "data": bytes}``.
+        Files are sealed E2E inside the same box as the text and metered by the
+        existing per-byte token formula (a big file is just an expensive wire).
+        The recipient must advertise ATTACHMENTS_CAPABILITY, else the send is
+        refused (files are content, never silently dropped).
         """
-        if not isinstance(text, str) or not text:
-            raise ValueError("empty message")
+        if not isinstance(text, str):
+            raise ValueError("text must be a string")
+        has_attachments = bool(attachments)
+        if not text and not has_attachments:
+            raise ValueError("empty message — need text or an attachment")
         if len(text) > MAX_WIRE_CHARS:
             raise ValueError(f"a wire is max {MAX_WIRE_CHARS} chars — split it up")
         if priority is not None and priority not in PRIORITIES:
             raise ValueError(f"priority must be one of {'|'.join(PRIORITIES)}")
+        encoded_attachments = _encode_attachments(attachments) if has_attachments else None
 
         recipient = self.lookup(to)
         if not recipient["verified"]:
@@ -160,12 +223,25 @@ class TelegraphClient:
                 "hint": "recipient directory record failed signature verification — refusing to encrypt",
             })
 
+        caps = recipient.get("capabilities") or []
+        if has_attachments and ATTACHMENTS_CAPABILITY not in caps:
+            raise TelegraphError(0, {
+                "error": "recipient_no_attachments",
+                "hint": f"recipient does not advertise {ATTACHMENTS_CAPABILITY} — refusing to drop files silently",
+            })
         wants_threading = thread_id is not None or reply_to is not None or priority is not None
-        capable = WIRE_ENVELOPE_CAPABILITY in (recipient.get("capabilities") or [])
+        capable = WIRE_ENVELOPE_CAPABILITY in caps
         apply_threading = wants_threading and capable
+        structured = apply_threading or has_attachments
         plaintext = (
-            pack_wire(text, thread_id=thread_id, reply_to=reply_to, priority=priority)
-            if apply_threading else text
+            pack_wire(
+                text,
+                thread_id=thread_id if apply_threading else None,
+                reply_to=reply_to if apply_threading else None,
+                priority=priority if apply_threading else None,
+                attachments=encoded_attachments,
+            )
+            if structured else text
         )
 
         sealed = crypto.encrypt(plaintext, recipient["boxPublicKey"], self.identity["boxSecretKey"])
@@ -201,6 +277,7 @@ class TelegraphClient:
             "replyTo": reply_to if apply_threading else None,
             "priority": priority if apply_threading else None,
             "threadingApplied": apply_threading,
+            "attachments": len(encoded_attachments) if has_attachments else 0,
         }
         if wants_threading and not capable:
             out["threadingDropped"] = f"recipient does not advertise {WIRE_ENVELOPE_CAPABILITY}"
@@ -232,6 +309,7 @@ class TelegraphClient:
             sender = m.get("sender")
             text, verified = None, False
             thread_id = reply_to = priority = None
+            attachments = []
             # Every link in the chain, or it isn't verified: the sender record is
             # key-bound, the envelope is signed by that key, and the box opens
             # under it. Any one missing and we won't claim to know who sent this.
@@ -249,6 +327,7 @@ class TelegraphClient:
                     env = unpack_wire(plaintext)
                     text = env["text"]
                     thread_id, reply_to, priority = env["threadId"], env["replyTo"], env["priority"]
+                    attachments = _decode_attachments(env["attachments"])
 
             messages.append(Message(
                 id=m.get("id"),
@@ -258,6 +337,7 @@ class TelegraphClient:
                 received_at=m.get("receivedAt"),
                 text=text,
                 verified=verified,
+                attachments=attachments,
                 thread_id=thread_id,
                 reply_to=reply_to,
                 priority=priority,
@@ -306,7 +386,7 @@ class TelegraphClient:
                 m["nonce"], m["ciphertext"], self.identity["boxPublicKey"], self.identity["boxSecretKey"]
             )
             env = unpack_wire(plaintext) if plaintext is not None else {
-                "text": None, "threadId": None, "replyTo": None, "priority": None
+                "text": None, "threadId": None, "replyTo": None, "priority": None, "attachments": []
             }
             out.append({
                 "id": m.get("id"),
@@ -318,6 +398,7 @@ class TelegraphClient:
                 "threadId": env["threadId"],
                 "replyTo": env["replyTo"],
                 "priority": env["priority"],
+                "attachments": _decode_attachments(env["attachments"]),
             })
         return out
 

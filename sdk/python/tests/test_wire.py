@@ -3,7 +3,7 @@ these must match what the JavaScript SDK produces so a threaded wire packed by
 one unpacks in the other (see test_e2e.py for the live interop check)."""
 import pytest
 
-from telegraph import pack_wire, unpack_wire, group_threads
+from telegraph import pack_wire, unpack_wire, group_threads, MAX_ATTACHMENTS
 
 
 def test_pack_stays_bare_without_metadata():
@@ -26,8 +26,8 @@ def test_pack_rejects_bad_priority():
 
 def test_unpack_round_trips_and_reads_bare_as_text():
     packed = pack_wire("yo", thread_id="T", reply_to="R", priority="low")
-    assert unpack_wire(packed) == {"text": "yo", "threadId": "T", "replyTo": "R", "priority": "low"}
-    assert unpack_wire("just text") == {"text": "just text", "threadId": None, "replyTo": None, "priority": None}
+    assert unpack_wire(packed) == {"text": "yo", "threadId": "T", "replyTo": "R", "priority": "low", "attachments": []}
+    assert unpack_wire("just text") == {"text": "just text", "threadId": None, "replyTo": None, "priority": None, "attachments": []}
 
 
 def test_unpack_never_mistakes_ordinary_json_for_an_envelope():
@@ -39,6 +39,35 @@ def test_unpack_never_mistakes_ordinary_json_for_an_envelope():
 
 def test_unpack_drops_a_bad_priority_to_none():
     assert unpack_wire('{"_tgv":1,"text":"x","priority":"nonsense"}')["priority"] is None
+
+
+def test_pack_embeds_attachments_with_js_matching_key_order():
+    # name, mime, size, data — the same key order the JS SDK's wire.js emits, so
+    # a packed attachment envelope is byte-identical across the two SDKs.
+    packed = pack_wire("see file", attachments=[{"name": "a.txt", "mime": "text/plain", "size": 3, "data": "AAEC"}])
+    assert packed == \
+        '{"_tgv":1,"text":"see file","attachments":[{"name":"a.txt","mime":"text/plain","size":3,"data":"AAEC"}]}'
+
+
+def test_pack_defaults_attachment_name_and_mime():
+    env = unpack_wire(pack_wire("", attachments=[{"data": "AAEC"}]))
+    assert env["attachments"][0]["name"] == "attachment-1"
+    assert env["attachments"][0]["mime"] == "application/octet-stream"
+
+
+def test_empty_attachments_list_stays_bare():
+    assert pack_wire("hi", attachments=[]) == "hi"
+
+
+def test_pack_rejects_too_many_attachments():
+    with pytest.raises(ValueError):
+        pack_wire("x", attachments=[{"data": "AA"}] * (MAX_ATTACHMENTS + 1))
+
+
+def test_unpack_skips_malformed_attachment_entries():
+    env = unpack_wire('{"_tgv":1,"text":"t","attachments":[{"data":"AAEC"},{"name":"no-data"},42,null]}')
+    assert len(env["attachments"]) == 1
+    assert env["attachments"][0]["data"] == "AAEC"
 
 
 def test_group_threads_buckets_by_thread_oldest_first():

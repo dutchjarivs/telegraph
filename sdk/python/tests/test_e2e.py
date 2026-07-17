@@ -198,6 +198,84 @@ def test_javascript_threads_and_python_reads_the_thread(relay):
     assert msgs[0].verified is True
 
 
+def test_python_attaches_and_javascript_reads_the_file(relay):
+    """A file attached in Python must decrypt byte-for-byte in the JavaScript SDK.
+    Small payload so the sealed wire fits the relay's default 16 KB cap."""
+    py = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    js_identity = TelegraphClient.generate_identity()
+    js = TelegraphClient(relay, identity=js_identity)
+    py.register(handle="py-att-sender")
+    js.register(handle="js-att-reader")  # register() advertises attachments-v1
+
+    payload = bytes([0, 1, 2, 250, 255])
+    sent = py.send("@js-att-reader", "file from python", attachments=[{"name": "p.bin", "mime": "application/octet-stream", "data": payload}])
+    assert sent["attachments"] == 1
+
+    out = node_client_script(relay, js_identity, """
+        const msgs = await tg.inbox();
+        process.stdout.write(JSON.stringify(msgs.map((m) => ({
+          text: m.text, verified: m.verified,
+          att: m.attachments.map((a) => ({ name: a.name, mime: a.mime, size: a.size, bytes: [...a.data] })),
+        }))));
+    """)
+    assert len(out) == 1
+    assert out[0]["text"] == "file from python"
+    assert out[0]["verified"] is True
+    assert len(out[0]["att"]) == 1
+    assert out[0]["att"][0]["name"] == "p.bin"
+    assert out[0]["att"][0]["size"] == 5
+    assert out[0]["att"][0]["bytes"] == [0, 1, 2, 250, 255], "JavaScript decoded different bytes than Python sealed"
+
+
+def test_javascript_attaches_and_python_reads_the_file(relay):
+    """The other direction: JS attaches the file, Python decodes it."""
+    py_identity = TelegraphClient.generate_identity()
+    py = TelegraphClient(relay, identity=py_identity)
+    js_identity = TelegraphClient.generate_identity()
+    py.register(handle="py-att-reader")  # advertises attachments-v1
+    TelegraphClient(relay, identity=js_identity).register(handle="js-att-sender")
+
+    node_client_script(relay, js_identity, """
+        const data = new Uint8Array([9, 8, 7, 6, 0, 255]);
+        await tg.send('@py-att-reader', 'file from js', { attachments: [{ name: 'j.bin', mime: 'text/plain', data }] });
+        process.stdout.write('{}');
+    """)
+
+    msgs = py.inbox()
+    assert len(msgs) == 1
+    assert msgs[0].text == "file from js"
+    assert msgs[0].verified is True
+    assert len(msgs[0].attachments) == 1
+    assert msgs[0].attachments[0]["name"] == "j.bin"
+    assert msgs[0].attachments[0]["mime"] == "text/plain"
+    assert msgs[0].attachments[0]["data"] == bytes([9, 8, 7, 6, 0, 255]), "Python decoded different bytes than JavaScript sealed"
+
+
+def test_attachment_to_an_opted_out_recipient_is_refused(relay):
+    a = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    b = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    a.register(handle="py-att-drop-a")
+    b.register(handle="py-att-drop-b", attachments=False)  # attachment-unaware peer
+
+    with pytest.raises(TelegraphError):
+        a.send("@py-att-drop-b", "file for you", attachments=[{"name": "x", "data": b"\x01\x02"}])
+    assert b.inbox() == []  # nothing landed — refused before the send
+
+
+def test_python_attachment_round_trip_and_sent_history(relay):
+    a = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    b = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    a.register(handle="py-att-rt-a")
+    b.register(handle="py-att-rt-b")
+
+    a.send("@py-att-rt-b", "with file", attachments=[{"name": "r.bin", "data": b"\x07\x07\x07"}])
+    got = b.inbox(ack=True)
+    assert got[0].attachments[0]["data"] == b"\x07\x07\x07"
+    # The sender's own outbox carries the attachment it sent, decrypted.
+    log = a.sent()
+    assert log[0].get("attachments") and log[0]["attachments"][0]["data"] == b"\x07\x07\x07"
+
+
 def test_python_threading_round_trip_and_reply(relay):
     a = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
     b = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
