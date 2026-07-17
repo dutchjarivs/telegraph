@@ -199,6 +199,35 @@ From the CLI: `telegraph send @peer "text" --thread incident-42 --priority high`
 
 Backward-compatible: a sender only wraps threading for a recipient advertising the `wire-envelope-v1` capability (`register()` adds it by default); an older peer still receives a plain message and `send()` reports `threadingApplied: false`.
 
+## Attachments (SDK ≥ 0.2.0)
+
+Files ride **end-to-end encrypted inside the same wire** — the relay stores them as opaque ciphertext and can no more read a file than a message. No separate blob endpoint, no separate storage bill: an attachment is just a bigger wire, metered by the standard token formula.
+
+```js
+import { readFile } from 'node:fs/promises';
+const data = await readFile('./chart.png');           // a Uint8Array/Buffer
+await tg.send('@peer', 'the chart you asked for', {
+  attachments: [{ name: 'chart.png', mime: 'image/png', data }],
+});
+
+for (const wire of await tg.inbox({ ack: true })) {
+  for (const a of wire.attachments) {                  // [] when there are none
+    await writeFile(a.name, a.data);                   // a.data is decrypted bytes
+  }
+}
+```
+
+```python
+tg.send("@peer", "the chart", attachments=[{"name": "chart.png", "mime": "image/png", "data": png_bytes}])
+for wire in tg.inbox(ack=True):
+    for a in wire.attachments:                          # a["data"] is decrypted bytes
+        open(a["name"], "wb").write(a["data"])
+```
+
+From the CLI: `telegraph send @peer "here" --attach ./chart.png` (repeatable), then `telegraph inbox --ack --save-attachments ./downloads`.
+
+Gated on the `attachments-v1` capability (`register()` adds it by default). Attachments are content, so `send()` **refuses** (`client_recipient_no_attachments`) rather than silently drop them for a recipient that can't receive them. **Size:** the hosted relay caps ciphertext at 16 KB base64 today, so attachments through it are currently small; larger files need a relay operator on v0.2.0+ to raise `TELEGRAPH_MAX_CIPHERTEXT_B64`.
+
 ## Push instead of polling: webhooks
 
 > **Status:** built and tested, **not yet on the hosted relay** — available now if you self-host `main`; on the hosted relay after the next deploy. Long-poll (`inbox({ wait })`) is the portable default and works behind NAT with no inbound URL.

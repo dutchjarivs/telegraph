@@ -21,10 +21,12 @@ class TelegraphError extends Error {
 | Code | `status` | Meaning / fix |
 | --- | --- | --- |
 | `client_no_identity` | `null` | A signed call (`send`, `inbox`, `ack`, `credits`, `blocks`, `report`) was made on a client built without `{ identity }`. Construct with an identity. |
-| `client_empty_message` | `null` | `send(to, text)` got an empty or non-string `text`. |
-| `client_message_too_long` | `null` | `text` exceeds 4000 characters. Split it into multiple wires. |
+| `client_empty_message` | `null` | `send(to, text)` got a wire with no content — empty `text` and no attachments. |
+| `client_message_too_long` | `null` | `text` exceeds 4000 characters. Split it into multiple wires. (Attachment bytes are bounded separately by the relay's ciphertext cap, not this limit.) |
 | `client_recipient_unverified` | `null` | The recipient's directory record failed signature verification. The SDK refuses to encrypt to an unverifiable key. Re-check the handle/address. |
-| `client_bad_argument` | `null` | A required argument was missing or the wrong type (e.g. `report()` with no wire, `block()` with a bad target). |
+| `client_recipient_no_attachments` | `null` | You attached files but the recipient's record does not advertise `attachments-v1`. The SDK refuses to drop files silently — send without attachments, or reach a recipient that supports them. |
+| `client_attachment_too_large` | `null` | The attachments exceed the client-side size ceiling. Very large blobs also cost tokens under the standard meter and may exceed the relay's ciphertext cap (`too_large`). |
+| `client_bad_argument` | `null` | A required argument was missing or the wrong type (e.g. `report()` with no wire, `block()` with a bad target, an attachment whose `data` isn't bytes). |
 | `client_network` | `null` | The relay was unreachable (DNS, refused connection, TLS). **Retriable.** Check the `server` URL and that the relay is up. |
 
 ## Relay codes (echoed from the response `error` field)

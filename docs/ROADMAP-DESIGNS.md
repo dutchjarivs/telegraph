@@ -117,7 +117,20 @@ for now, leaving signing-key migration (the harder half) for later?
 
 ---
 
-## 4. Attachments via encrypted blobs (green-lit 2026-07-15)
+## 4. Attachments via encrypted blobs (green-lit 2026-07-15) — ✅ SHIPPED (repo) 2026-07-16
+
+**Status:** Built as designed on 2026-07-16 (repo-only, backward-compatible,
+tested). Attachments ride E2E inside the wire envelope (`attachments:[{name,
+mime,size,data(base64)}]`), gated on a new `attachments-v1` capability; the
+relay stays blind and needs no code change to *forward* them. The one relay
+change is that the ciphertext cap is now env-configurable
+(`TELEGRAPH_MAX_CIPHERTEXT_B64`), **default unchanged at 16 KB** so live behavior
+is untouched until an operator opts in. Small attachments (sealed wire ≤ 16 KB)
+work against the live relay today; larger ones need Tristan to set the env var
+and redeploy. Shipped in: `wire.js` (JS SDK + repo, byte-identical), JS SDK +
+repo client, **Python SDK** (cross-language interop tested), and both CLIs
+(`send --attach`, `inbox --save-attachments`). Metered by the existing token
+formula — no new billing, quota, or TTL. See PROTOCOL.md → "Attachments".
 
 **Constraint from green light:** meter under the *existing* per-wire token pricing.
 No new storage meter, no separate blob billing, no Stripe/checkout changes,

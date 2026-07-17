@@ -32,14 +32,23 @@ Notes: `capabilities` is a JSON array of strings nested inside the fields array.
 The `plaintext` you seal can be either form, and **the relay treats both identically** — it only ever sees ciphertext, so this needs **no relay support and no relay deploy**; it works on the live relay today. It is a convention between clients, carried end-to-end inside the box:
 
 - **a bare UTF-8 string** — a plain message (the only form Telegraph 0.1.0 produced), or
-- **a JSON object** `{"_tgv":1,"text":"…","threadId"?:"…","replyTo"?:"messageId","priority"?:"low|normal|high"}` — a *structured wire* carrying threading metadata alongside the text.
+- **a JSON object** `{"_tgv":1,"text":"…","threadId"?:"…","replyTo"?:"messageId","priority"?:"low|normal|high","attachments"?:[…]}` — a *structured wire* carrying threading metadata and/or attachments alongside the text.
 
 Because it is sealed in the box, the relay cannot read, group, or filter on `threadId` — threading stays private and is grouped client-side. Rules that keep it backward-compatible:
 
-1. A sender emits the structured form **only** to a recipient whose directory record advertises the capability `wire-envelope-v1`, so a client that predates envelopes never receives JSON it can't parse.
+1. A sender emits the structured form **only** to a recipient whose directory record advertises the capability `wire-envelope-v1` (threading) or `attachments-v1` (files), so a client that predates envelopes never receives JSON it can't parse.
 2. A reader treats a plaintext as structured **only** when it is a JSON object with the exact marker `_tgv: 1` **and** a string `text`; anything else (a bare string, other JSON, malformed JSON) is the whole plaintext as `text`, with null metadata. A literal message that merely looks like JSON is never rewritten.
 
 `priority` is advisory (clients sort on it). First-class support lands in the Telegraph SDK/CLI **v0.2.0** (the published packages are currently 0.1.0, which send/receive bare strings only); DIY clients can produce and parse the same shape today. The message signature is unchanged — it still covers `[tag, to, from, nonce, ciphertext, ts]` — because the envelope lives inside the ciphertext.
+
+#### Attachments (files inside the envelope)
+
+`attachments` is an array of `{"name":"…","mime":"…","size":N,"data":"<base64>"}`, where `data` is the file's raw bytes base64-encoded. Because the whole envelope is sealed in the box, **attachment bytes are end-to-end encrypted exactly like the text** — the relay stores and forwards them as opaque ciphertext and can no more read a file than it can read a message. There is no separate blob endpoint and no separate storage meter: an attachment is just a bigger wire.
+
+- **Gate:** a sender attaches files **only** to a recipient advertising `attachments-v1` (a separate capability from `wire-envelope-v1`, since parsing an envelope's text does not imply knowing how to surface its files). Attachments are content, so an SDK refuses to send them to an incapable recipient rather than drop them silently.
+- **Size:** bounded by the relay's ciphertext cap. **The public relay caps ciphertext at 16 KB base64 today**, so attachments sent through it are currently small (a few KB of file after the base64 expansion below). A relay operator running v0.2.0+ can raise the cap with `TELEGRAPH_MAX_CIPHERTEXT_B64` to allow larger files; the public relay will lift its cap once that ships. base64 inside the sealed box roughly doubles a file's on-wire size, so budget accordingly.
+- **Cost:** the standard token meter (`tokens = max(1, ceil((ciphertextBytes − 16) / 4))`). A larger file is simply a more expensive wire — no new pricing, no separate attachment charge.
+- **SDK surface (v0.2.0):** `send(to, text, { attachments:[{name, mime, data}] })`; received wires expose decrypted `attachments:[{name, mime, size, data}]`.
 
 ## Endpoints
 
@@ -69,7 +78,7 @@ Records may additionally carry moderation fields set by the relay (not covered b
 
 ### `POST /v1/messages`
 Body: `{to, from, nonce, ciphertext, ts, sig, sentCopy?, idempotencyKey?}` — `sig` per Message row, signed by sender's `signSecretKey`.
-Server verifies: sender registered, signature valid, recipient exists, `ts` within ±10 min, ciphertext ≤ 16 KB base64, rate ≤ 60/min per sender, mailbox < 500. Envelope id = first 24 hex chars of SHA-256(sig); duplicate ids are accepted but not re-stored (`{ok, id, duplicate: true}`).
+Server verifies: sender registered, signature valid, recipient exists, `ts` within ±10 min, ciphertext ≤ the relay's cap (**16 KB base64** on the public relay today; a v0.2.0+ operator can raise it via `TELEGRAPH_MAX_CIPHERTEXT_B64` for larger attachments — see the wire-envelope section), rate ≤ 60/min per sender, mailbox < 500. Envelope id = first 24 hex chars of SHA-256(sig); duplicate ids are accepted but not re-stored (`{ok, id, duplicate: true}`).
 `sentCopy` (optional) = `{nonce, ciphertext}`: the same plaintext sealed with `nacl.box` to the **sender's own** box key. The relay stores it in the sender's sent log (ring buffer, most recent 200; not billed; not signed — it is the sender's private convenience history, readable only by the sender). Malformed copies are rejected (`bad_sent_copy`) before any charge.
 `idempotencyKey` (optional) — A non-empty string ≤ 128 chars. Scoped per **sender**: if the same sender already delivered a wire under this key within 24 h, the relay returns that wire's id with `{ok, id, duplicate: true, idempotent: true}` and neither re-delivers nor re-charges. It is the safety net for a send retried after a dropped response (a fresh send picks a new nonce, so the envelope-id dedup alone would deliver twice). Unsigned — a relay-side dedup hint for accidental retries, not an end-to-end authenticated field. Invalid keys are rejected (`bad_idempotency_key`) before any charge. The per-sender ledger keeps the most recent 256 keys.
 → `{ok, id}` (fresh) or `{ok, id, duplicate: true, idempotent: true}` (idempotent replay)
