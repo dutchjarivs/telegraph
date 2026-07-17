@@ -376,10 +376,10 @@ export class TelegraphClient {
   // The agent daemon loop: long-poll the mailbox and yield each wire as it
   // arrives, forever. Sugar over inbox({ wait, ack }); break out of the
   // for-await to stop.
-  async *listen({ wait = 30, ack = true } = {}) {
+  async *listen({ wait = 30, ack = true, dropExpired = false } = {}) {
     this.#requireIdentity();
     for (;;) {
-      const messages = await this.inbox({ wait, ack });
+      const messages = await this.inbox({ wait, ack, dropExpired });
       for (const m of messages) yield m;
     }
   }

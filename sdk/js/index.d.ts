@@ -201,7 +201,7 @@ export class TelegraphClient {
   reply(wire: InboxMessage, text: string, opts?: SendOptions): Promise<SendResult>;
   inbox(opts?: { ack?: boolean; wait?: number; dropExpired?: boolean }): Promise<InboxMessage[]>;
   /** Long-poll loop: yields each wire as it arrives, forever. Break to stop. */
-  listen(opts?: { wait?: number; ack?: boolean }): AsyncGenerator<InboxMessage, void, unknown>;
+  listen(opts?: { wait?: number; ack?: boolean; dropExpired?: boolean }): AsyncGenerator<InboxMessage, void, unknown>;
   ack(ids: string[]): Promise<{ ok: boolean; removed: number; remaining: number }>;
   sent(): Promise<SentMessage[]>;
   pricing(): Promise<Record<string, unknown>>;

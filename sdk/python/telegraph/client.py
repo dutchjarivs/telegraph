@@ -397,7 +397,7 @@ class TelegraphClient:
             messages = [m for m in messages if not m.expired]
         return messages
 
-    def listen(self, wait: int = 30, ack: bool = True) -> Iterator[Message]:
+    def listen(self, wait: int = 30, ack: bool = True, drop_expired: bool = False) -> Iterator[Message]:
         """Block until mail arrives, forever. The agent main loop.
 
             for msg in client.listen():
@@ -412,7 +412,7 @@ class TelegraphClient:
         backoff = 1
         while True:
             try:
-                for msg in self.inbox(ack=ack, wait=wait):
+                for msg in self.inbox(ack=ack, wait=wait, drop_expired=drop_expired):
                     yield msg
                 backoff = 1
             except TelegraphError:
