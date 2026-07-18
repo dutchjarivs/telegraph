@@ -342,13 +342,18 @@ class TelegraphClient:
         thread_id = wire.thread_id or wire.id
         return self.send(wire.from_, text, thread_id=thread_id, reply_to=wire.id, priority=priority)
 
-    def inbox(self, ack: bool = False, wait: int = 0, drop_expired: bool = False) -> list[Message]:
+    def inbox(self, ack: bool = False, wait: int = 0, drop_expired: bool = False,
+              receipt: bool = False) -> list[Message]:
         """Fetch and decrypt waiting wires.
 
         ``wait`` (seconds) long-polls: the relay holds the connection open on an
         empty mailbox and answers the instant a wire lands. A timeout is not an
         error, it just comes back empty — call again. This is how you wait for
         mail without busy-polling, and unlike a webhook it works from behind NAT.
+
+        ``receipt`` (only meaningful with ``ack``) signs a delivery receipt for
+        each acked wire, so the original sender can later prove — via
+        :meth:`receipts` — that you fetched it.
         """
         path = f"/v1/inbox?wait={int(wait)}" if wait > 0 else "/v1/inbox"
         # Outlast the relay's own hold, or urllib would abandon a long-poll that
@@ -406,12 +411,27 @@ class TelegraphClient:
         # Ack every fetched wire (expired included, so drop_expired still clears
         # them), then filter the returned view.
         if ack and messages:
-            self.ack([m.id for m in messages])
+            receipts = (
+                [self._make_receipt(m.id, m.from_) for m in messages] if receipt else None
+            )
+            self.ack([m.id for m in messages], receipts=receipts)
         if drop_expired:
             messages = [m for m in messages if not m.expired]
         return messages
 
-    def listen(self, wait: int = 30, ack: bool = True, drop_expired: bool = False) -> Iterator[Message]:
+    def _make_receipt(self, message_id: str, frm: str) -> dict:
+        # A recipient-signed delivery receipt binding (messageId, sender,
+        # recipient, at) under this identity's signing key. ``frm`` is the wire's
+        # sender; the recipient is us.
+        at = _now_ms()
+        sig = crypto.sign_fields(
+            crypto.receipt_fields(message_id, frm, self.identity["address"], at),
+            self.identity["signSecretKey"],
+        )
+        return {"messageId": message_id, "at": at, "sig": sig}
+
+    def listen(self, wait: int = 30, ack: bool = True, drop_expired: bool = False,
+               receipt: bool = False) -> Iterator[Message]:
         """Block until mail arrives, forever. The agent main loop.
 
             for msg in client.listen():
@@ -426,7 +446,7 @@ class TelegraphClient:
         backoff = 1
         while True:
             try:
-                for msg in self.inbox(ack=ack, wait=wait, drop_expired=drop_expired):
+                for msg in self.inbox(ack=ack, wait=wait, drop_expired=drop_expired, receipt=receipt):
                     yield msg
                 backoff = 1
             except TelegraphError:
@@ -435,8 +455,41 @@ class TelegraphClient:
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 60)
 
-    def ack(self, ids: list[str]) -> dict:
-        return self._req("POST", "/v1/inbox/ack", {"ids": ids}, signed=True)
+    def ack(self, ids: list[str], receipts: list[dict] | None = None) -> dict:
+        body = {"ids": ids, "receipts": receipts} if receipts else {"ids": ids}
+        return self._req("POST", "/v1/inbox/ack", body, signed=True)
+
+    def receipts(self) -> list[dict]:
+        """Delivery receipts for wires you sent — recipient-signed proof they
+        were fetched and acked. Each is re-verified here against the recipient's
+        registered signing key over (messageId, you, recipient, at):
+        ``verified`` True means the proof holds; False means the recipient's
+        record didn't verify or the signature didn't check — don't trust it."""
+        r = self._req("GET", "/v1/receipts", signed=True)
+        key_cache: dict[str, str | None] = {}
+        out = []
+        for rc in _as_list(r.get("receipts")):
+            recipient = rc.get("recipient")
+            if recipient not in key_cache:
+                try:
+                    rec = self.lookup(recipient)
+                    key_cache[recipient] = rec["signPublicKey"] if rec.get("verified") else None
+                except TelegraphError:
+                    key_cache[recipient] = None
+            key = key_cache.get(recipient)
+            verified = bool(key and crypto.verify_fields(
+                crypto.receipt_fields(rc.get("messageId"), self.identity["address"], recipient, rc.get("at")),
+                rc.get("sig"),
+                key,
+            ))
+            out.append({
+                "messageId": rc.get("messageId"),
+                "recipient": recipient,
+                "recipientHandle": rc.get("recipientHandle"),
+                "at": rc.get("at"),
+                "verified": verified,
+            })
+        return out
 
     def sent(self) -> list[dict]:
         r = self._req("GET", "/v1/sent", signed=True)

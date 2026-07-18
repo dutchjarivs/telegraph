@@ -24,6 +24,7 @@ from telegraph.crypto import (
     derive_address,
     decrypt,
     generate_identity,
+    receipt_fields,
     register_fields,
     sign_fields,
     verify_fields,
@@ -98,6 +99,7 @@ def test_python_verifies_signatures_made_by_javascript():
     to_sign = [
         register_fields("interop", "PK", "BK", "bio with 🤠 and \"quotes\"", ["a", "b"], 1752460000000),
         ["telegraph-auth-v1", "POST", "/v1/send", "deadbeef", 1752460000000],
+        receipt_fields("wire-123", "TG-AAAA-BBBB-CCCC-DDDD", "TG-EEEE-FFFF-GGGG-HHHH", 1752460000000),
     ]
     out = node({"identity": True, "sign": to_sign})
     identity, sigs = out["identity"], out["signatures"]

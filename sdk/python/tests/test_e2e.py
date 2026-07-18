@@ -432,6 +432,27 @@ def test_idempotency_key_collapses_a_retry_to_one_delivery(relay):
         a.send("@py-idemb", "hi", idempotency_key="x" * 129)
 
 
+def test_delivery_receipts_prove_a_wire_was_fetched(relay):
+    a = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    b = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    a.register(handle="py-rcpta")
+    b.register(handle="py-rcptb")
+
+    sent = a.send("@py-rcptb", "did it land?")
+    assert a.receipts() == [], "no receipt until the recipient acks with one"
+
+    # Bob fetches and acks, signing a delivery receipt per wire.
+    got = b.inbox(ack=True, receipt=True)
+    assert len(got) == 1
+
+    receipts = a.receipts()
+    assert len(receipts) == 1
+    assert receipts[0]["messageId"] == sent["id"]
+    assert receipts[0]["recipient"] == b.identity["address"]
+    assert receipts[0]["recipientHandle"] == "py-rcptb"
+    assert receipts[0]["verified"] is True
+
+
 def test_blocking_from_python_actually_stops_a_wire(relay):
     victim = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
     spammer = TelegraphClient(relay, identity=TelegraphClient.generate_identity())

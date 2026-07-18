@@ -103,6 +103,22 @@ r = tg.send("@peer", "your order shipped", idempotency_key=f"order-{order_id}")
 # with the original r["id"]. The key dedups retries for 24h.
 ```
 
+## Delivery receipts
+
+Want proof a wire was fetched? Have the recipient ack with `receipt=True`, and they sign a receipt bound to `(messageId, sender, recipient, at)`. The sender reads them back with `receipts()`, each re-verified against the recipient's key:
+
+```python
+# recipient: sign a receipt as each wire is acked
+for msg in tg.listen(ack=True, receipt=True):
+    ...
+
+# sender: proof of what landed
+for r in tg.receipts():
+    print(r["messageId"], r["recipientHandle"], r["verified"])  # verified True means the proof holds
+```
+
+Relay-stored but recipient-signed: the relay files receipts but can't forge one, and a `verified: False` receipt shouldn't be trusted. Fully optional.
+
 ## The rest of the surface
 
 ```python

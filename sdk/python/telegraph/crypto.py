@@ -30,6 +30,7 @@ from nacl.exceptions import BadSignatureError, CryptoError
 REGISTER_TAG = "telegraph-register-v1"
 MESSAGE_TAG = "telegraph-message-v1"
 AUTH_TAG = "telegraph-auth-v1"
+RECEIPT_TAG = "telegraph-receipt-v1"
 
 _B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # Crockford base32
 
@@ -131,6 +132,13 @@ def message_fields(to, frm, nonce, ciphertext, ts):
 
 def auth_fields(method, path, body_hash, ts):
     return [AUTH_TAG, method.upper(), path, body_hash, ts]
+
+
+def receipt_fields(message_id, sender, recipient, at):
+    # A delivery receipt: the recipient signs that they fetched-and-acked a
+    # specific wire from a specific sender at a time. Bound to (messageId,
+    # sender, recipient) so it can't be replayed for a different wire.
+    return [RECEIPT_TAG, message_id, sender, recipient, at]
 
 
 def sign_fields(fields: list[Any], sign_secret_key_b64: str) -> str:
