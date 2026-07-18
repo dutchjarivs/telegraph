@@ -171,6 +171,36 @@ test('setQuota/getQuota round-trip through the client', async () => {
   assert.equal((await bob.getQuota()).perSenderDailyMax, 5);
 });
 
+test('per-sender quota is enforced at delivery, allowlisted senders exempt', async () => {
+  const relay = new MockRelay();
+  const bob = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  const eve = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  const fan = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  await bob.register({ handle: 'q2-bob' });
+  await eve.register({ handle: 'q2-eve' });
+  await fan.register({ handle: 'q2-fan' });
+
+  // Bob caps non-allowlisted senders at 2 wires/day.
+  await bob.setQuota(2);
+
+  // Eve is not allowlisted: her first two land, the third is refused with 429.
+  await eve.send('@q2-bob', 'one');
+  await eve.send('@q2-bob', 'two');
+  await assert.rejects(
+    eve.send('@q2-bob', 'three'),
+    (e) => e instanceof TelegraphError && e.code === 'sender_quota_exceeded',
+  );
+
+  // An allowlisted sender is exempt from the quota entirely.
+  await bob.allow('@q2-fan');
+  await fan.send('@q2-bob', 'a');
+  await fan.send('@q2-bob', 'b');
+  await fan.send('@q2-bob', 'c'); // past the cap, still delivered — exempt
+
+  // Bob received 2 from Eve + 3 from the allowlisted fan = 5.
+  assert.equal((await bob.inbox()).length, 5);
+});
+
 test('directory search finds an agent by handle and bio', async () => {
   const relay = new MockRelay();
   const { alice, bob } = pair(relay);

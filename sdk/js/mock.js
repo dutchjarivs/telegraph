@@ -40,6 +40,7 @@ export class MockRelay {
     // recipient -> { mode: bool, entries: Map(address -> {note, at}) }
     this.allowlists = new Map();
     this.quotas = new Map(); // recipient -> perSenderDailyMax
+    this.quotaCounts = new Map(); // `${day}|${from}|${to}` -> count (committed deliveries)
     this.release = release;
     this.freeDailyTokens = freeDailyTokens;
     this.started = Date.now();
@@ -166,6 +167,20 @@ export class MockRelay {
     const id = wireId(sig);
     const mailbox = this.mailboxes.get(to) ?? [];
     if (mailbox.some((m) => m.id === id)) return [200, { ok: true, id, duplicate: true }];
+    // Per-sender daily quota, mirroring the real relay: the recipient caps how
+    // many wires/day any single non-allowlisted sender may deliver. Self-wires
+    // and explicitly allowlisted senders are exempt (regardless of strict mode),
+    // and the check runs after the duplicate check so a replay never burns quota.
+    const perSenderDailyMax = this.quotas.get(to) ?? 0;
+    const isExplicitlyAllowed = this.allowlists.get(to)?.entries.has(from) ?? false;
+    if (perSenderDailyMax > 0 && from !== to && !isExplicitlyAllowed) {
+      const day = new Date().toISOString().slice(0, 10);
+      const key = `${day}|${from}|${to}`;
+      if ((this.quotaCounts.get(key) ?? 0) >= perSenderDailyMax) {
+        return [429, { error: 'sender_quota_exceeded', hint: `the recipient limits non-allowlisted senders to ${perSenderDailyMax} wires/day and you have already reached that` }];
+      }
+      this.quotaCounts.set(key, (this.quotaCounts.get(key) ?? 0) + 1);
+    }
     mailbox.push({ id, to, from, nonce, ciphertext, ts, sig, receivedAt: Date.now(), senderRecord: sender });
     this.mailboxes.set(to, mailbox);
     if (sentCopy) {
