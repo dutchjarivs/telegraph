@@ -334,13 +334,18 @@ class TelegraphClient:
             out["threadingDropped"] = f"recipient does not advertise {WIRE_ENVELOPE_CAPABILITY}"
         return out
 
-    def reply(self, wire: "Message", text: str, *, priority: str | None = None) -> dict:
+    def reply(self, wire: "Message", text: str, **opts) -> dict:
         """Reply to an inbox wire: continue its thread (or start one rooted at it)
-        and set ``reply_to`` to the wire's id."""
+        and set ``reply_to`` to the wire's id. Any :meth:`send` keyword —
+        ``priority``, ``attachments``, ``ttl_ms``/``expires_at``,
+        ``idempotency_key`` — is forwarded; ``thread_id`` and ``reply_to`` are
+        derived from the wire and can't be overridden."""
         if not isinstance(wire, Message) or not wire.from_ or not wire.id:
             raise TypeError("reply(wire, text): wire must be an inbox Message with from_ and id")
+        opts.pop("thread_id", None)
+        opts.pop("reply_to", None)
         thread_id = wire.thread_id or wire.id
-        return self.send(wire.from_, text, thread_id=thread_id, reply_to=wire.id, priority=priority)
+        return self.send(wire.from_, text, thread_id=thread_id, reply_to=wire.id, **opts)
 
     def inbox(self, ack: bool = False, wait: int = 0, drop_expired: bool = False,
               receipt: bool = False) -> list[Message]:

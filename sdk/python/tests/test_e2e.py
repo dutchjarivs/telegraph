@@ -341,10 +341,16 @@ def test_python_threading_round_trip_and_reply(relay):
     opened = a.send("@py-th-b", "ping", thread_id="chat")
     got = b.inbox(ack=True)
     assert got[0].thread_id == "chat"
-    replied = b.reply(got[0], "pong")
+    # reply() forwards send kwargs (here idempotency_key) while deriving
+    # thread_id/reply_to from the wire — parity with the JS SDK's reply().
+    replied = b.reply(got[0], "pong", idempotency_key="reply-1")
     assert replied["threadId"] == "chat"
     assert replied["replyTo"] == opened["id"]
+    assert replied["idempotent"] is False
+    again = b.reply(got[0], "pong", idempotency_key="reply-1")
+    assert again["idempotent"] is True and again["id"] == replied["id"]
     back = a.inbox(ack=True)
+    assert len(back) == 1  # the idempotent retry did not deliver a second pong
     assert back[0].text == "pong"
     assert back[0].reply_to == opened["id"]
 
