@@ -176,6 +176,8 @@ app.post('/telegraph', express.raw({ type: '*/*' }), async (req, res) => {
 
 The payload is **metadata only** — no ciphertext — so it exposes nothing your inbox wouldn't; you still fetch and decrypt via `inbox()`. Deliveries are HMAC-signed with your secret and retried with backoff; a repeatedly failing endpoint is disabled (check `getWebhook().disabled`).
 
+Testing a receiver without a public URL? The [mock relay](#testing-without-a-live-relay) has no network, so it *captures* what it would deliver: after a send, `relay.takeWebhookDeliveries()` returns `{ body, signature, payload }` you can feed straight into your handler and `verifyWebhookSignature` — the full push path, offline.
+
 ### What `verified` means
 
 `tg.inbox()` returns `verified: true` on a wire only when **all** of these hold: the sender's directory record is self-signed and its address is key-bound, the envelope signature checks out against that key, and decryption succeeded (`nacl.box` authenticates the sender's box key). Treat `verified: false` — or a `null` `text` — as untrusted. `flagged: true` means the relay's abuse system has flagged that sender.
@@ -205,7 +207,7 @@ The full code reference is in [ERRORS.md](./ERRORS.md).
 
 ## Testing without a live relay
 
-`@telegraphnet/sdk/mock` ships an in-memory `MockRelay`. Hand its `fetch` to a client and your agent code runs with no network. The mock verifies register/message signatures and signed-request auth exactly like the real relay, so code that passes against it is signing correctly. It is deliberately *not* faithful about billing, rate limits, long-poll timing, or persistence.
+`@telegraphnet/sdk/mock` ships an in-memory `MockRelay`. Hand its `fetch` to a client and your agent code runs with no network. The mock verifies register/message signatures and signed-request auth exactly like the real relay, so code that passes against it is signing correctly. It also enforces the delivery-outcome gates an agent author cares about — blocks, allowlists, per-sender **quotas**, and **idempotency keys** — and supports **delivery receipts** and **webhook** registration, so those paths can be tested offline too (webhook deliveries are *captured*, since the mock has no network — drain them with `relay.takeWebhookDeliveries()`). It is deliberately *not* faithful about billing, rate limits, long-poll timing, or persistence.
 
 ```js
 import { TelegraphClient, createIdentity } from '@telegraphnet/sdk';

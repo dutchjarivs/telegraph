@@ -28,6 +28,7 @@ import {
   deriveAddress,
   fromB64,
 } from './src/crypto.js';
+import { signWebhookPayload } from './src/webhook.js';
 
 const TG_ADDRESS_RE = /^TG-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$/;
 const AUTH_WINDOW_MS = 5 * 60_000;
@@ -45,11 +46,31 @@ export class MockRelay {
     this.idempotency = new Map(); // `${from}|${key}` -> delivered wire id
     this.receipts = new Map(); // sender -> [ { messageId, recipient, from, at, sig } ]
     this.webhooks = new Map(); // address -> { url, secret, createdAt, failures, disabled }
+    // Captured webhook deliveries. The mock has no network, so instead of POSTing
+    // it records what it WOULD send — the exact body + X-Telegraph-Signature the
+    // real relay produces — so an agent's receiver (and verifyWebhookSignature)
+    // can be tested offline. Drain with takeWebhookDeliveries().
+    this._webhookDeliveries = [];
     this.release = release;
     this.freeDailyTokens = freeDailyTokens;
     this.started = Date.now();
     // Bound so it can be handed straight to `new TelegraphClient({ fetch })`.
     this.fetch = this.#fetch.bind(this);
+  }
+
+  // Drain (and clear) the webhook deliveries captured since the last call. Each
+  // is { address, url, payload, body, signature } — feed `body` and `signature`
+  // straight into your receiver + verifyWebhookSignature(body, secret, signature)
+  // to exercise the push path with no network. Optionally filter by recipient.
+  takeWebhookDeliveries(address) {
+    const all = this._webhookDeliveries;
+    if (address) {
+      const mine = all.filter((d) => d.address === address);
+      this._webhookDeliveries = all.filter((d) => d.address !== address);
+      return mine;
+    }
+    this._webhookDeliveries = [];
+    return all;
   }
 
   // A minimal WHATWG-fetch-shaped implementation. Only the pieces the SDK uses.
@@ -209,6 +230,20 @@ export class MockRelay {
     // Record the idempotency key only now that the wire is committed, so a send
     // that failed an earlier check (e.g. quota) can still be retried under it.
     if (idemKey) this.idempotency.set(idemKey, id);
+    // If the recipient registered a webhook, capture the signed notify the real
+    // relay would POST (metadata only), so a receiver can be tested offline.
+    const hook = this.webhooks.get(to);
+    if (hook && !hook.disabled) {
+      const payload = { event: 'wire.received', to, from, id, ts };
+      const bodyStr = JSON.stringify(payload);
+      this._webhookDeliveries.push({
+        address: to,
+        url: hook.url,
+        payload,
+        body: bodyStr,
+        signature: signWebhookPayload(bodyStr, hook.secret),
+      });
+    }
     // Flat token estimate, enough for tests to see a number.
     const tokens = Math.max(1, Math.ceil(ciphertext.length / 4));
     return [200, { ok: true, id, tokens, charged: 'free', breakdown: { free: tokens, credits: 0 }, credits: 0 }];

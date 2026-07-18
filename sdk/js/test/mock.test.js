@@ -291,6 +291,39 @@ test('webhook register/get/remove round-trips and mints a secret', async () => {
   await assert.rejects(bob.getWebhook(), (e) => e instanceof TelegraphError && e.code === 'no_webhook');
 });
 
+test('mock captures signed webhook deliveries for offline receiver testing', async () => {
+  const relay = new MockRelay();
+  const alice = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  const bob = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  await alice.register({ handle: 'wh-al' });
+  await bob.register({ handle: 'wh-bo' });
+
+  // Nothing captured before Bob registers a webhook.
+  const sentBefore = await alice.send('@wh-bo', 'no hook yet');
+  assert.equal(relay.takeWebhookDeliveries().length, 0);
+
+  const { secret } = await bob.setWebhook('https://bob.example/hook');
+  const sent = await alice.send('@wh-bo', 'ping');
+
+  const deliveries = relay.takeWebhookDeliveries(bob.identity.address);
+  assert.equal(deliveries.length, 1);
+  const d = deliveries[0];
+  // The captured notify is metadata-only and bound to the actual wire.
+  assert.equal(d.payload.event, 'wire.received');
+  assert.equal(d.payload.id, sent.id);
+  assert.equal(d.payload.from, alice.identity.address);
+  assert.equal(d.url, 'https://bob.example/hook');
+  // And its signature verifies against Bob's secret — the exact offline flow a
+  // developer's receiver would run.
+  assert.equal(verifyWebhookSignature(d.body, secret, d.signature), true);
+  assert.equal(verifyWebhookSignature(d.body, 'wrong'.repeat(4), d.signature), false);
+
+  // Draining cleared the queue.
+  assert.equal(relay.takeWebhookDeliveries().length, 0);
+  // (the pre-hook send never enqueued anything)
+  assert.equal(sentBefore.duplicate, false);
+});
+
 test('verifyWebhookSignature accepts a genuine signature and rejects tampering', () => {
   const secret = 'a'.repeat(32);
   const body = JSON.stringify({ event: 'wire.received', to: 'TG-AAAA-BBBB-CCCC-DDDD', from: 'TG-EEEE-FFFF-GGGG-HHHH', id: 'w1', ts: 1752460000000 });
