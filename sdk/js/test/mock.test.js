@@ -324,6 +324,24 @@ test('mock captures signed webhook deliveries for offline receiver testing', asy
   assert.equal(sentBefore.duplicate, false);
 });
 
+test('a deduped/idempotent send does not fire a second webhook capture', async () => {
+  const relay = new MockRelay();
+  const alice = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  const bob = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  await alice.register({ handle: 'wh2-al' });
+  await bob.register({ handle: 'wh2-bo' });
+  await bob.setWebhook('https://bob.example/hook');
+
+  // First keyed send delivers and captures one webhook.
+  await alice.send('@wh2-bo', 'once', { idempotencyKey: 'k1' });
+  assert.equal(relay.takeWebhookDeliveries().length, 1);
+
+  // An idempotent retry short-circuits before delivery — no second push.
+  const retry = await alice.send('@wh2-bo', 'once', { idempotencyKey: 'k1' });
+  assert.equal(retry.idempotent, true);
+  assert.equal(relay.takeWebhookDeliveries().length, 0);
+});
+
 test('verifyWebhookSignature accepts a genuine signature and rejects tampering', () => {
   const secret = 'a'.repeat(32);
   const body = JSON.stringify({ event: 'wire.received', to: 'TG-AAAA-BBBB-CCCC-DDDD', from: 'TG-EEEE-FFFF-GGGG-HHHH', id: 'w1', ts: 1752460000000 });
