@@ -17,6 +17,9 @@
 export { TelegraphClient, MAX_WIRE_CHARS, MAX_ATTACHMENT_TOTAL_BYTES } from './src/client.js';
 export { TelegraphError, ERROR_CODES, explain } from './src/errors.js';
 
+// Webhook receiver helpers: verify the relay's signed push deliveries.
+export { verifyWebhookSignature, signWebhookPayload } from './src/webhook.js';
+
 // Wire-envelope helpers — threadId / replyTo / priority and attachments ride E2E
 // inside the sealed box, invisible to the relay. groupThreads() groups a set of
 // wires into conversations client-side.

@@ -44,6 +44,7 @@ export class MockRelay {
     this.quotaCounts = new Map(); // `${day}|${from}|${to}` -> count (committed deliveries)
     this.idempotency = new Map(); // `${from}|${key}` -> delivered wire id
     this.receipts = new Map(); // sender -> [ { messageId, recipient, from, at, sig } ]
+    this.webhooks = new Map(); // address -> { url, secret, createdAt, failures, disabled }
     this.release = release;
     this.freeDailyTokens = freeDailyTokens;
     this.started = Date.now();
@@ -92,6 +93,9 @@ export class MockRelay {
     if (route === 'GET /v1/allowlist') return this.#listAllow(headers);
     if (route === 'POST /v1/quota') return this.#setQuota(json, headers, rawBody);
     if (route === 'GET /v1/quota') return this.#getQuota(headers);
+    if (route === 'POST /v1/webhook') return this.#setWebhook(json, headers, rawBody);
+    if (route === 'GET /v1/webhook') return this.#getWebhook(headers);
+    if (route === 'POST /v1/webhook/remove') return this.#removeWebhook(headers, rawBody);
     return [404, { error: 'no_such_route' }];
   }
 
@@ -362,6 +366,49 @@ export class MockRelay {
     const auth = this.#auth('GET', '/v1/quota', headers, '');
     if (auth.error) return [auth.status, auth];
     return [200, { perSenderDailyMax: this.quotas.get(auth.address) ?? 0 }];
+  }
+
+  // Webhook registration is stored and returned like the real relay, but the
+  // in-memory mock does NOT deliver (there's no network) — use a live relay to
+  // exercise actual push delivery. This lets an agent's setWebhook/getWebhook/
+  // removeWebhook plumbing be tested offline.
+  #setWebhook(body, headers, rawBody) {
+    const auth = this.#auth('POST', '/v1/webhook', headers, rawBody);
+    if (auth.error) return [auth.status, auth];
+    const url = body?.url;
+    if (typeof url !== 'string' || !url) return [400, { error: 'bad_webhook_url', hint: 'url is required (https)' }];
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return [400, { error: 'bad_webhook_url', hint: 'url must be a valid absolute URL' }];
+    }
+    if (parsed.protocol !== 'https:') return [400, { error: 'bad_webhook_url', reason: 'not_https', hint: 'webhook url must be https' }];
+    let secret = body?.secret;
+    if (secret !== undefined) {
+      if (typeof secret !== 'string' || secret.length < 16 || secret.length > 128) {
+        return [400, { error: 'bad_webhook_secret', hint: 'secret is an optional string 16–128 chars; omit it to have one generated' }];
+      }
+    } else {
+      secret = crypto.randomBytes(32).toString('hex');
+    }
+    this.webhooks.set(auth.address, { url: parsed.href, secret, createdAt: Date.now(), failures: 0, disabled: false });
+    return [200, { ok: true, url: parsed.href, secret, note: 'mock relay stores webhooks but does not deliver them; use a live relay for push delivery' }];
+  }
+
+  #getWebhook(headers) {
+    const auth = this.#auth('GET', '/v1/webhook', headers, '');
+    if (auth.error) return [auth.status, auth];
+    const hook = this.webhooks.get(auth.address);
+    if (!hook) return [404, { error: 'no_webhook', hint: 'register one with POST /v1/webhook {url}' }];
+    return [200, { url: hook.url, createdAt: hook.createdAt, failures: hook.failures, disabled: hook.disabled }];
+  }
+
+  #removeWebhook(headers, rawBody) {
+    const auth = this.#auth('POST', '/v1/webhook/remove', headers, rawBody);
+    if (auth.error) return [auth.status, auth];
+    if (!this.webhooks.delete(auth.address)) return [404, { error: 'no_webhook', hint: 'nothing to remove' }];
+    return [200, { ok: true, removed: true }];
   }
 
   // Verifies a signed request the same way the real relay does: the address

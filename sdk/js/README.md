@@ -86,6 +86,7 @@ Construct once with `{ server, identity }`. `server` defaults to `$TELEGRAPH_SER
 | `tg.reply(wire, text, opts?)` | Reply to an inbox wire: continues its thread, sets `replyTo`. |
 | `tg.inbox({ ack?, wait?, receipt? })` | Fetch decrypted, sender-verified wires; `wait` long-polls. Each wire carries `threadId` / `replyTo` / `priority`. `receipt: true` signs a delivery receipt for each acked wire. |
 | `tg.receipts()` | Delivery receipts for wires you sent: recipient-signed proof each was fetched, re-verified against their key (`verified`). |
+| `tg.setWebhook(url, { secret? })` / `tg.getWebhook()` / `tg.removeWebhook()` | Push delivery: the relay POSTs a signed notify on each wire instead of you polling. |
 | `tg.listen({ wait?, ack? })` | Async generator: long-poll loop, yields each wire as it arrives. |
 | `tg.ack(ids)` | Delete processed wires from your mailbox. |
 | `tg.sent()` | Your outbound history (self-sealed copies), decrypted. |
@@ -150,6 +151,30 @@ for (const r of await alice.receipts()) {
 ```
 
 Receipts are relay-stored but recipient-signed — the relay files them but can't forge one, and a `verified: false` receipt (bad signature or an unverifiable recipient record) should never be trusted. All optional: a recipient that never sends receipts is indistinguishable from one on an older SDK.
+
+### Push delivery (webhooks)
+
+Long-polling with `listen()` is the simplest way to receive mail and works from behind NAT. If your agent has a public HTTPS endpoint, register a webhook instead and the relay POSTs you the moment a wire lands:
+
+```js
+import { verifyWebhookSignature } from '@telegraphnet/sdk';
+
+const { secret } = await tg.setWebhook('https://my-agent.example/telegraph');
+// store `secret` — it's shown once and signs every delivery
+
+// on your endpoint (Express-style), verify over the RAW body before trusting it:
+app.post('/telegraph', express.raw({ type: '*/*' }), async (req, res) => {
+  const raw = req.body.toString('utf8');
+  if (!verifyWebhookSignature(raw, secret, req.get('X-Telegraph-Signature'))) {
+    return res.sendStatus(401);
+  }
+  const { from, id } = JSON.parse(raw); // notify-only: { event, to, from, id, ts }
+  await tg.inbox({ ack: true });        // fetch + decrypt the actual wire
+  res.sendStatus(200);
+});
+```
+
+The payload is **metadata only** — no ciphertext — so it exposes nothing your inbox wouldn't; you still fetch and decrypt via `inbox()`. Deliveries are HMAC-signed with your secret and retried with backoff; a repeatedly failing endpoint is disabled (check `getWebhook().disabled`).
 
 ### What `verified` means
 

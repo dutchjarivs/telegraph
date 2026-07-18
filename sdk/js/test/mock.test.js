@@ -2,7 +2,7 @@
 // exercised end-to-end against MockRelay with no network, so can a developer's.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TelegraphClient, createIdentity, TelegraphError } from '../index.js';
+import { TelegraphClient, createIdentity, TelegraphError, verifyWebhookSignature, signWebhookPayload } from '../index.js';
 import { MockRelay } from '../mock.js';
 
 function pair(relay) {
@@ -261,6 +261,47 @@ test('signed delivery receipts: recipient proves fetch, sender verifies', async 
   assert.equal(receipts[0].recipient, bob.identity.address);
   assert.equal(receipts[0].recipientHandle, 'rcpt-bo');
   assert.equal(receipts[0].verified, true);
+});
+
+test('webhook register/get/remove round-trips and mints a secret', async () => {
+  const relay = new MockRelay();
+  const bob = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  await bob.register({ handle: 'hook-bob' });
+
+  // No webhook yet.
+  await assert.rejects(bob.getWebhook(), (e) => e instanceof TelegraphError && e.code === 'no_webhook');
+
+  // A non-https url is refused; a good one registers and mints a secret.
+  await assert.rejects(
+    bob.setWebhook('http://insecure.example/hook'),
+    (e) => e instanceof TelegraphError && e.code === 'bad_webhook_url',
+  );
+  const reg = await bob.setWebhook('https://agent.example/telegraph');
+  assert.equal(reg.ok, true);
+  assert.equal(reg.url, 'https://agent.example/telegraph');
+  assert.ok(reg.secret && reg.secret.length >= 16);
+
+  const status = await bob.getWebhook();
+  assert.equal(status.url, 'https://agent.example/telegraph');
+  assert.equal(status.disabled, false);
+  assert.ok(!('secret' in status), 'getWebhook must never echo the secret');
+
+  const removed = await bob.removeWebhook();
+  assert.equal(removed.removed, true);
+  await assert.rejects(bob.getWebhook(), (e) => e instanceof TelegraphError && e.code === 'no_webhook');
+});
+
+test('verifyWebhookSignature accepts a genuine signature and rejects tampering', () => {
+  const secret = 'a'.repeat(32);
+  const body = JSON.stringify({ event: 'wire.received', to: 'TG-AAAA-BBBB-CCCC-DDDD', from: 'TG-EEEE-FFFF-GGGG-HHHH', id: 'w1', ts: 1752460000000 });
+  const header = signWebhookPayload(body, secret);
+
+  assert.equal(verifyWebhookSignature(body, secret, header), true);
+  // Wrong secret, tampered body, and a garbage header all fail — none throw.
+  assert.equal(verifyWebhookSignature(body, 'b'.repeat(32), header), false);
+  assert.equal(verifyWebhookSignature(body + ' ', secret, header), false);
+  assert.equal(verifyWebhookSignature(body, secret, 'sha256=deadbeef'), false);
+  assert.equal(verifyWebhookSignature(body, secret, undefined), false);
 });
 
 test('directory search finds an agent by handle and bio', async () => {

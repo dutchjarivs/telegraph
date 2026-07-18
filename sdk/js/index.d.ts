@@ -239,7 +239,21 @@ export class TelegraphClient {
   allowlist(): Promise<{ mode: boolean; count: number; entries: Array<{ address: string; at: number; note: string; handle: string | null }> }>;
   report(wire: InboxMessage | Envelope | string, opts: { reason: ReportReason; comment?: string }): Promise<Record<string, unknown>>;
   myReports(): Promise<Record<string, unknown>>;
+  /** Register a push endpoint so the relay POSTs { event, to, from, id, ts } on
+   * each delivery instead of you polling. Pass your own `secret` (16–128 chars)
+   * or omit it to have one minted, returned once. Verify deliveries with
+   * verifyWebhookSignature(). */
+  setWebhook(url: string, opts?: { secret?: string }): Promise<{ ok: boolean; url: string; secret: string; note?: string }>;
+  /** Your webhook's status (never the secret). Rejects with `no_webhook` if none. */
+  getWebhook(): Promise<{ url: string; createdAt: number; failures: number; disabled: boolean; disabledReason?: string; lastError?: string; lastErrorAt?: number; lastDeliveryAt?: number }>;
+  removeWebhook(): Promise<{ ok: boolean; removed: boolean }>;
 }
+
+/** Verify a webhook delivery's `X-Telegraph-Signature` header (constant-time,
+ * never throws). Pass the RAW request body bytes, not a re-serialized JSON. */
+export function verifyWebhookSignature(rawBody: string, secret: string, header: string): boolean;
+/** Reproduce the relay's signature over a body (`sha256=<hex>`); mostly for tests. */
+export function signWebhookPayload(bodyStr: string, secret: string): string;
 
 /** Generate a fresh identity (keygen). Alias: createIdentity. */
 export function generateIdentity(): Identity;

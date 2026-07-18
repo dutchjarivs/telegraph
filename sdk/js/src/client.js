@@ -454,6 +454,36 @@ export class TelegraphClient {
     return this.#req('POST', '/v1/inbox/ack', body, { signed: true });
   }
 
+  // Register (or replace) a push endpoint so the relay POSTs you a notify the
+  // moment a wire lands, instead of you long-polling. The payload is metadata
+  // only — { event, to, from, id, ts } — so it leaks nothing the relay couldn't
+  // already see; fetch and decrypt the wire via inbox() as usual. The delivery
+  // is HMAC-signed with `secret`: pass your own (16–128 chars, pre-shared with
+  // your receiver) or omit it to have the relay mint one, returned exactly once
+  // here. Verify it on your endpoint with verifyWebhookSignature().
+  async setWebhook(url, { secret } = {}) {
+    this.#requireIdentity();
+    if (!url || typeof url !== 'string') {
+      throw new TelegraphError('client_bad_argument', 'setWebhook(url) needs an https URL string');
+    }
+    if (secret !== undefined && (typeof secret !== 'string' || secret.length < 16 || secret.length > 128)) {
+      throw new TelegraphError('client_bad_argument', 'secret is an optional string 16–128 chars; omit it to have one generated');
+    }
+    return this.#req('POST', '/v1/webhook', { url, ...(secret ? { secret } : {}) }, { signed: true });
+  }
+
+  // Your registered webhook's status (never the secret): url, createdAt, failure
+  // count, and whether the relay disabled it after repeated delivery failures.
+  async getWebhook() {
+    this.#requireIdentity();
+    return this.#req('GET', '/v1/webhook', null, { signed: true });
+  }
+
+  async removeWebhook() {
+    this.#requireIdentity();
+    return this.#req('POST', '/v1/webhook/remove', {}, { signed: true });
+  }
+
   // Decrypted history of your own outbound wires (the self-sealed copies the
   // relay stores, ring-buffered). text=null means the copy didn't decrypt —
   // treat that as tampering or a key mismatch, not normal.
