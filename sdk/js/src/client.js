@@ -10,6 +10,7 @@ import {
   registerFields,
   messageFields,
   authFields,
+  receiptFields,
   signFields,
   verifyFields,
   verifyAgentRecord,
@@ -317,7 +318,7 @@ export class TelegraphClient {
   //   dropExpired: skip wires whose sender-set expiresAt has passed (default
   //         false — expired wires are still returned, flagged `expired: true`, so
   //         nothing is hidden silently; set true to filter them out for you).
-  async inbox({ ack = false, wait = 0, dropExpired = false } = {}) {
+  async inbox({ ack = false, wait = 0, receipt = false, dropExpired = false } = {}) {
     this.#requireIdentity();
     const path = wait > 0 ? `/v1/inbox?wait=${encodeURIComponent(wait)}` : '/v1/inbox';
     const r = await this.#req('GET', path, null, { signed: true });
@@ -380,26 +381,77 @@ export class TelegraphClient {
     // still cleans them out of the mailbox), then filter the view returned to
     // the caller. Order matters: filter after collecting ack ids.
     if (ack && messages.length) {
-      await this.ack(messages.map((m) => m.id));
+      // A signed delivery receipt per acked wire, so the original sender can
+      // later prove (via receipts()) that you fetched it. Bound to the wire's
+      // actual sender (m.from) — never a caller-supplied value.
+      const receipts = receipt ? messages.map((m) => this.#makeReceipt(m.id, m.from)) : undefined;
+      await this.ack(messages.map((m) => m.id), { receipts });
     }
     if (dropExpired) messages = messages.filter((m) => !m.expired);
     return messages;
   }
 
+  // A recipient-signed delivery receipt binding (messageId, sender, recipient, at)
+  // under this identity's signing key — the same proof the relay files and a
+  // sender re-verifies. `from` is the wire's sender; the recipient is us.
+  #makeReceipt(messageId, from) {
+    const at = Date.now();
+    const sig = signFields(receiptFields(messageId, from, this.identity.address, at), this.identity.signSecretKey);
+    return { messageId, at, sig };
+  }
+
+  // Delivery receipts for wires you sent — recipient-signed proof they were
+  // fetched and acked. Each is re-verified here against the recipient's
+  // registered signing key over (messageId, you, recipient, at): verified=true
+  // means the proof holds; verified=false means the recipient's record didn't
+  // verify or the signature didn't check — don't trust it.
+  async receipts() {
+    this.#requireIdentity();
+    const r = await this.#req('GET', '/v1/receipts', null, { signed: true });
+    const list = asArray(r.receipts);
+    const keyCache = new Map();
+    const out = [];
+    for (const rc of list) {
+      if (!keyCache.has(rc.recipient)) {
+        let key = null;
+        try {
+          const rec = await this.lookup(rc.recipient);
+          key = rec.verified ? rec.signPublicKey : null;
+        } catch {
+          key = null;
+        }
+        keyCache.set(rc.recipient, key);
+      }
+      const key = keyCache.get(rc.recipient);
+      const verified = key
+        ? verifyFields(receiptFields(rc.messageId, this.identity.address, rc.recipient, rc.at), rc.sig, key)
+        : false;
+      out.push({
+        messageId: rc.messageId,
+        recipient: rc.recipient,
+        recipientHandle: rc.recipientHandle ?? null,
+        at: rc.at,
+        verified,
+      });
+    }
+    return out;
+  }
+
   // The agent daemon loop: long-poll the mailbox and yield each wire as it
   // arrives, forever. Sugar over inbox({ wait, ack }); break out of the
   // for-await to stop.
-  async *listen({ wait = 30, ack = true, dropExpired = false } = {}) {
+  async *listen({ wait = 30, ack = true, receipt = false, dropExpired = false } = {}) {
     this.#requireIdentity();
     for (;;) {
-      const messages = await this.inbox({ wait, ack, dropExpired });
+      const messages = await this.inbox({ wait, ack, receipt, dropExpired });
       for (const m of messages) yield m;
     }
   }
 
-  async ack(ids) {
+  async ack(ids, { receipts } = {}) {
     this.#requireIdentity();
-    return this.#req('POST', '/v1/inbox/ack', { ids }, { signed: true });
+    const body = receipts && receipts.length ? { ids, receipts } : { ids };
+    return this.#req('POST', '/v1/inbox/ack', body, { signed: true });
   }
 
   // Decrypted history of your own outbound wires (the self-sealed copies the

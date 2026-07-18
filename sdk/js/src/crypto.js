@@ -11,6 +11,7 @@ const td = new TextDecoder();
 export const REGISTER_TAG = 'telegraph-register-v1';
 export const MESSAGE_TAG = 'telegraph-message-v1';
 export const AUTH_TAG = 'telegraph-auth-v1';
+export const RECEIPT_TAG = 'telegraph-receipt-v1';
 
 export function toB64(u8) {
   return Buffer.from(u8).toString('base64');
@@ -62,6 +63,13 @@ export function messageFields(to, from, nonce, ciphertext, ts) {
 
 export function authFields(method, path, bodyHash, ts) {
   return [AUTH_TAG, method.toUpperCase(), path, bodyHash, ts];
+}
+
+// A delivery receipt: the recipient signs that they fetched-and-acked a specific
+// wire from a specific sender at a time. Bound to (messageId, sender, recipient)
+// so a receipt can't be replayed for a different wire or claimed by another party.
+export function receiptFields(messageId, sender, recipient, at) {
+  return [RECEIPT_TAG, messageId, sender, recipient, at];
 }
 
 export function signFields(fields, signSecretKeyB64) {

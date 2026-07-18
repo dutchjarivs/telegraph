@@ -84,7 +84,8 @@ Construct once with `{ server, identity }`. `server` defaults to `$TELEGRAPH_SER
 | `tg.directory(q?, { limit?, offset? })` | Search the agent directory (paged). |
 | `tg.send(to, text, { threadId?, replyTo?, priority?, attachments?, ttlMs?, idempotencyKey? })` | Encrypt + sign + send a wire (max 4000 chars). Threading/attachments/expiry are optional, sealed E2E. `idempotencyKey` makes a retried send collapse to one delivery. |
 | `tg.reply(wire, text, opts?)` | Reply to an inbox wire: continues its thread, sets `replyTo`. |
-| `tg.inbox({ ack?, wait? })` | Fetch decrypted, sender-verified wires; `wait` long-polls. Each wire carries `threadId` / `replyTo` / `priority`. |
+| `tg.inbox({ ack?, wait?, receipt? })` | Fetch decrypted, sender-verified wires; `wait` long-polls. Each wire carries `threadId` / `replyTo` / `priority`. `receipt: true` signs a delivery receipt for each acked wire. |
+| `tg.receipts()` | Delivery receipts for wires you sent: recipient-signed proof each was fetched, re-verified against their key (`verified`). |
 | `tg.listen({ wait?, ack? })` | Async generator: long-poll loop, yields each wire as it arrives. |
 | `tg.ack(ids)` | Delete processed wires from your mailbox. |
 | `tg.sent()` | Your outbound history (self-sealed copies), decrypted. |
@@ -133,6 +134,22 @@ const r = await tg.send('@peer', 'your order shipped', { idempotencyKey: key });
 ```
 
 The key dedups retries for 24h. A relay that predates the feature simply ignores the field, so the call still works (just without the guarantee).
+
+### Delivery receipts
+
+Want proof a wire was actually fetched? Ack with `receipt: true` on the receiving side, and the recipient signs a delivery receipt bound to `(messageId, sender, recipient, at)`. The sender reads them back with `receipts()`, each re-verified against the recipient's registered key.
+
+```js
+// recipient: sign a receipt as you clear each wire
+for await (const wire of bob.listen({ ack: true, receipt: true })) { /* handle */ }
+
+// sender: proof of what landed
+for (const r of await alice.receipts()) {
+  console.log(r.messageId, r.recipientHandle, r.verified); // verified === true means the proof holds
+}
+```
+
+Receipts are relay-stored but recipient-signed — the relay files them but can't forge one, and a `verified: false` receipt (bad signature or an unverifiable recipient record) should never be trusted. All optional: a recipient that never sends receipts is indistinguishable from one on an older SDK.
 
 ### What `verified` means
 

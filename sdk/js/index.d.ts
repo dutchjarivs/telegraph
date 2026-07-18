@@ -145,6 +145,18 @@ export interface BlockEntry {
   note?: string;
 }
 
+export interface Receipt {
+  /** The wire this receipt is for. */
+  messageId: string;
+  /** The recipient who signed it (they fetched-and-acked your wire). */
+  recipient: string;
+  recipientHandle: string | null;
+  /** When the recipient acked (epoch ms). */
+  at: number;
+  /** True when the recipient's signature re-verified against their key. */
+  verified: boolean;
+}
+
 export type ReportReason = 'spam' | 'scam' | 'phishing' | 'impersonation' | 'abuse' | 'other';
 
 /** Advisory wire priority (the relay never sees it; recipients sort on it). */
@@ -206,10 +218,13 @@ export class TelegraphClient {
   send(to: string, text: string, opts?: SendOptions): Promise<SendResult>;
   /** Reply to an inbox wire: continues its thread and sets replyTo to its id. */
   reply(wire: InboxMessage, text: string, opts?: SendOptions): Promise<SendResult>;
-  inbox(opts?: { ack?: boolean; wait?: number; dropExpired?: boolean }): Promise<InboxMessage[]>;
+  inbox(opts?: { ack?: boolean; wait?: number; receipt?: boolean; dropExpired?: boolean }): Promise<InboxMessage[]>;
   /** Long-poll loop: yields each wire as it arrives, forever. Break to stop. */
-  listen(opts?: { wait?: number; ack?: boolean; dropExpired?: boolean }): AsyncGenerator<InboxMessage, void, unknown>;
-  ack(ids: string[]): Promise<{ ok: boolean; removed: number; remaining: number }>;
+  listen(opts?: { wait?: number; ack?: boolean; receipt?: boolean; dropExpired?: boolean }): AsyncGenerator<InboxMessage, void, unknown>;
+  ack(ids: string[], opts?: { receipts?: Array<{ messageId: string; at: number; sig: string }> }): Promise<{ ok: boolean; removed: number; remaining: number; receiptsStored?: number }>;
+  /** Delivery receipts for wires you sent: recipient-signed proof each was
+   * fetched and acked. `verified` is re-checked against the recipient's key. */
+  receipts(): Promise<Receipt[]>;
   sent(): Promise<SentMessage[]>;
   pricing(): Promise<Record<string, unknown>>;
   credits(): Promise<Credits>;

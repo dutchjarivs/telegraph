@@ -22,6 +22,7 @@ import crypto from 'node:crypto';
 import {
   messageFields,
   authFields,
+  receiptFields,
   verifyFields,
   verifyAgentRecord,
   deriveAddress,
@@ -42,6 +43,7 @@ export class MockRelay {
     this.quotas = new Map(); // recipient -> perSenderDailyMax
     this.quotaCounts = new Map(); // `${day}|${from}|${to}` -> count (committed deliveries)
     this.idempotency = new Map(); // `${from}|${key}` -> delivered wire id
+    this.receipts = new Map(); // sender -> [ { messageId, recipient, from, at, sig } ]
     this.release = release;
     this.freeDailyTokens = freeDailyTokens;
     this.started = Date.now();
@@ -78,6 +80,7 @@ export class MockRelay {
     if (route === 'POST /v1/messages') return this.#message(json);
     if (route === 'GET /v1/inbox') return this.#inbox(u, headers);
     if (route === 'POST /v1/inbox/ack') return this.#ack(json, headers, rawBody);
+    if (route === 'GET /v1/receipts') return this.#receipts(headers);
     if (route === 'GET /v1/sent') return this.#sentLog(headers);
     if (route === 'GET /v1/credits') return this.#credits(headers);
     if (route === 'POST /v1/blocks') return this.#block(json, headers, rawBody);
@@ -223,9 +226,39 @@ export class MockRelay {
     if (auth.error) return [auth.status, auth];
     const ids = new Set((body?.ids ?? []));
     const mailbox = this.mailboxes.get(auth.address) ?? [];
+    // Optional signed delivery receipts, verified exactly like the real relay:
+    // each must be for a wire being acked and in this mailbox, signed by the
+    // acking address over (messageId, sender, recipient, at). Bad ones are
+    // skipped silently — a receipt never blocks the ack.
+    let receiptsStored = 0;
+    if (Array.isArray(body?.receipts) && body.receipts.length) {
+      const recipientKey = this.agents.get(auth.address)?.signPublicKey;
+      const byId = new Map(mailbox.map((m) => [m.id, m]));
+      for (const rc of recipientKey ? body.receipts : []) {
+        if (!rc || typeof rc.messageId !== 'string' || typeof rc.sig !== 'string' || typeof rc.at !== 'number') continue;
+        if (!ids.has(rc.messageId)) continue;
+        const entry = byId.get(rc.messageId);
+        if (!entry) continue;
+        if (!verifyFields(receiptFields(rc.messageId, entry.from, auth.address, rc.at), rc.sig, recipientKey)) continue;
+        const log = this.receipts.get(entry.from) ?? [];
+        if (log.some((r) => r.messageId === rc.messageId && r.recipient === auth.address)) continue;
+        log.push({ messageId: rc.messageId, recipient: auth.address, from: entry.from, at: rc.at, sig: rc.sig });
+        this.receipts.set(entry.from, log);
+        receiptsStored += 1;
+      }
+    }
     const keep = mailbox.filter((m) => !ids.has(m.id));
     this.mailboxes.set(auth.address, keep);
-    return [200, { ok: true, removed: mailbox.length - keep.length, remaining: keep.length }];
+    return [200, { ok: true, removed: mailbox.length - keep.length, remaining: keep.length, ...(receiptsStored ? { receiptsStored } : {}) }];
+  }
+
+  #receipts(headers) {
+    const auth = this.#auth('GET', '/v1/receipts', headers, '');
+    if (auth.error) return [auth.status, auth];
+    const receipts = (this.receipts.get(auth.address) ?? [])
+      .map((r) => ({ ...r, recipientHandle: this.agents.get(r.recipient)?.handle ?? null }))
+      .sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
+    return [200, { count: receipts.length, receipts }];
   }
 
   #sentLog(headers) {

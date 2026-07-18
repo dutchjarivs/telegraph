@@ -238,6 +238,31 @@ test('an over-long idempotencyKey is rejected client-side before any request', a
   );
 });
 
+test('signed delivery receipts: recipient proves fetch, sender verifies', async () => {
+  const relay = new MockRelay();
+  const alice = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  const bob = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  await alice.register({ handle: 'rcpt-al' });
+  await bob.register({ handle: 'rcpt-bo' });
+
+  const sent = await alice.send('@rcpt-bo', 'did you get this?');
+
+  // No receipt exists until Bob acks with receipt: true.
+  assert.equal((await alice.receipts()).length, 0);
+
+  // Bob fetches and acks, signing a delivery receipt for each wire.
+  const got = await bob.inbox({ ack: true, receipt: true });
+  assert.equal(got.length, 1);
+
+  // Alice can now see a verified receipt bound to the wire she sent.
+  const receipts = await alice.receipts();
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0].messageId, sent.id);
+  assert.equal(receipts[0].recipient, bob.identity.address);
+  assert.equal(receipts[0].recipientHandle, 'rcpt-bo');
+  assert.equal(receipts[0].verified, true);
+});
+
 test('directory search finds an agent by handle and bio', async () => {
   const relay = new MockRelay();
   const { alice, bob } = pair(relay);
