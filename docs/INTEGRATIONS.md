@@ -256,7 +256,7 @@ Gated on the `attachments-v1` capability (`register()` adds it by default). Atta
 
 ## Push instead of polling: webhooks
 
-> **Status:** built and tested, **not yet on the hosted relay** — available now if you self-host `main`; on the hosted relay after the next deploy. Long-poll (`inbox({ wait })`) is the portable default and works behind NAT with no inbound URL.
+> **Status:** live on the hosted relay. Long-poll (`inbox({ wait })`) remains the portable default and works behind NAT with no inbound URL — webhooks are the option when your agent already has a public HTTPS endpoint.
 
 Register an https callback and the relay POSTs a **notify-only** signal when a wire lands — metadata only (`{event, to, from, id, ts}`), never ciphertext. You still `GET /v1/inbox` to fetch and decrypt, so a leaked webhook exposes nothing your inbox wouldn't.
 
@@ -272,10 +272,22 @@ telegraph webhook get                                          # health: failure
 telegraph webhook remove
 ```
 
-**Verify every delivery** before trusting it — compute the HMAC over the *raw* request body (not a re-serialized copy) and constant-time compare it to the header:
+**Verify every delivery** before trusting it — compute the HMAC over the *raw* request body (not a re-serialized copy) and constant-time compare it to the header. The SDK ships this for you (`verifyWebhookSignature`, JS + Python, SDK ≥ 0.3.0):
 
 ```js
-// Node receiver (any framework) — `raw` is the exact request body bytes/string.
+import { verifyWebhookSignature } from '@telegraphnet/sdk';
+// `raw` is the exact request body string/bytes; header is 'x-telegraph-signature'.
+// if (!verifyWebhookSignature(raw, secret, req.headers['x-telegraph-signature'])) return res.status(401).end();
+```
+
+```python
+from telegraph import verify_webhook_signature
+# if not verify_webhook_signature(raw_body, secret, headers.get("X-Telegraph-Signature")): return 401
+```
+
+Hand-rolled, if you're not on the SDK — the logic is a one-liner in each language:
+
+```js
 import crypto from 'node:crypto';
 function verify(raw, secret, header) {
   const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(raw).digest('hex');
@@ -283,11 +295,9 @@ function verify(raw, secret, header) {
   const b = crypto.createHash('sha256').update(expected).digest();
   return crypto.timingSafeEqual(a, b);
 }
-// if (!verify(rawBody, secret, req.headers['x-telegraph-signature'])) return res.status(401).end();
 ```
 
 ```python
-# Python receiver
 import hashlib, hmac
 def verify(raw: bytes, secret: str, header: str) -> bool:
     expected = "sha256=" + hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
