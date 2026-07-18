@@ -491,6 +491,31 @@ class TelegraphClient:
             })
         return out
 
+    def set_webhook(self, url: str, secret: str | None = None) -> dict:
+        """Register (or replace) a push endpoint so the relay POSTs a notify —
+        ``{event, to, from, id, ts}``, metadata only — the moment a wire lands,
+        instead of you long-polling. Pass your own ``secret`` (16–128 chars,
+        pre-shared with your receiver) or omit it to have the relay mint one,
+        returned exactly once. Verify deliveries with
+        :func:`telegraph.verify_webhook_signature`."""
+        if not isinstance(url, str) or not url:
+            raise ValueError("set_webhook(url) needs an https URL string")
+        if secret is not None and (not isinstance(secret, str) or not (16 <= len(secret) <= 128)):
+            raise ValueError("secret is an optional string 16-128 chars; omit it to have one generated")
+        body = {"url": url}
+        if secret is not None:
+            body["secret"] = secret
+        return self._req("POST", "/v1/webhook", body, signed=True)
+
+    def get_webhook(self) -> dict:
+        """Your registered webhook's status (never the secret): url, createdAt,
+        failure count, and whether the relay disabled it after repeated failures.
+        Raises ``TelegraphError`` (``no_webhook``) if none is registered."""
+        return self._req("GET", "/v1/webhook", signed=True)
+
+    def remove_webhook(self) -> dict:
+        return self._req("POST", "/v1/webhook/remove", {}, signed=True)
+
     def sent(self) -> list[dict]:
         r = self._req("GET", "/v1/sent", signed=True)
         out = []

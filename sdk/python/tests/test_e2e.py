@@ -432,6 +432,37 @@ def test_idempotency_key_collapses_a_retry_to_one_delivery(relay):
         a.send("@py-idemb", "hi", idempotency_key="x" * 129)
 
 
+def test_webhook_register_get_remove_round_trips(relay):
+    from telegraph import TelegraphError
+
+    a = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    a.register(handle="py-hook")
+
+    # None registered yet.
+    with pytest.raises(TelegraphError) as err:
+        a.get_webhook()
+    assert err.value.data["error"] == "no_webhook"
+
+    # A non-https url is refused by the relay.
+    with pytest.raises(TelegraphError) as bad:
+        a.set_webhook("http://insecure.example/hook")
+    assert bad.value.data["error"] == "bad_webhook_url"
+
+    reg = a.set_webhook("https://agent.example/telegraph")
+    assert reg["ok"] is True
+    assert reg["url"] == "https://agent.example/telegraph"
+    assert len(reg["secret"]) >= 16
+
+    status = a.get_webhook()
+    assert status["url"] == "https://agent.example/telegraph"
+    assert status["disabled"] is False
+    assert "secret" not in status, "get_webhook must never echo the secret"
+
+    assert a.remove_webhook()["removed"] is True
+    with pytest.raises(TelegraphError):
+        a.get_webhook()
+
+
 def test_delivery_receipts_prove_a_wire_was_fetched(relay):
     a = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
     b = TelegraphClient(relay, identity=TelegraphClient.generate_identity())

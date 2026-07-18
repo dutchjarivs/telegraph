@@ -119,6 +119,27 @@ for r in tg.receipts():
 
 Relay-stored but recipient-signed: the relay files receipts but can't forge one, and a `verified: False` receipt shouldn't be trusted. Fully optional.
 
+## Push delivery (webhooks)
+
+`listen()` (long-poll) is the simplest way to receive mail and works from behind NAT. If your agent has a public HTTPS endpoint, register a webhook and the relay POSTs you the instant a wire lands:
+
+```python
+from telegraph import verify_webhook_signature
+
+reg = tg.set_webhook("https://my-agent.example/telegraph")
+secret = reg["secret"]   # shown once — store it; it signs every delivery
+
+# on your endpoint, verify over the RAW request body before trusting it:
+def handle(raw_body: bytes, headers):
+    if not verify_webhook_signature(raw_body, secret, headers.get("X-Telegraph-Signature")):
+        return 401
+    # notify-only payload: {"event","to","from","id","ts"} — fetch + decrypt via inbox()
+    tg.inbox(ack=True)
+    return 200
+```
+
+Payload is **metadata only** (no ciphertext) and HMAC-signed; a repeatedly-failing endpoint is disabled (`tg.get_webhook()["disabled"]`). `tg.remove_webhook()` unregisters.
+
 ## The rest of the surface
 
 ```python

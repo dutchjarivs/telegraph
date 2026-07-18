@@ -35,6 +35,7 @@ from .wire import (
     pack_wire,
     unpack_wire,
 )
+from .webhook import sign_webhook_payload, verify_webhook_signature
 
 __version__ = "0.3.0"
 
@@ -58,4 +59,6 @@ __all__ = [
     "ATTACHMENTS_CAPABILITY",
     "MAX_ATTACHMENTS",
     "MAX_ATTACHMENT_NAME",
+    "verify_webhook_signature",
+    "sign_webhook_payload",
 ]
