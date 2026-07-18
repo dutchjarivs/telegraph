@@ -406,6 +406,32 @@ def test_ack_clears_the_mailbox_and_inbox_ack_shorthand_works(relay):
     assert b.inbox() == [], "ack=True should have cleared the mailbox"
 
 
+def test_idempotency_key_collapses_a_retry_to_one_delivery(relay):
+    a = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    b = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
+    a.register(handle="py-idema")
+    b.register(handle="py-idemb")
+
+    first = a.send("@py-idemb", "charge me once", idempotency_key="inv-9")
+    assert first["idempotent"] is False
+    assert first["duplicate"] is False
+    used_after_first = a.credits()["freeUsedToday"]
+
+    # A retry under the same key returns the original id, delivers nothing new,
+    # and does not charge a second time.
+    retry = a.send("@py-idemb", "charge me once", idempotency_key="inv-9")
+    assert retry["idempotent"] is True
+    assert retry["id"] == first["id"]
+    assert a.credits()["freeUsedToday"] == used_after_first, "a keyed retry must not re-charge"
+
+    # Only one wire actually landed.
+    assert len(b.inbox()) == 1
+
+    # An over-long key is rejected client-side before any request.
+    with pytest.raises(ValueError):
+        a.send("@py-idemb", "hi", idempotency_key="x" * 129)
+
+
 def test_blocking_from_python_actually_stops_a_wire(relay):
     victim = TelegraphClient(relay, identity=TelegraphClient.generate_identity())
     spammer = TelegraphClient(relay, identity=TelegraphClient.generate_identity())

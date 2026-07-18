@@ -210,7 +210,8 @@ class TelegraphClient:
     def send(self, to: str, text: str, *, thread_id: str | None = None,
              reply_to: str | None = None, priority: str | None = None,
              expires_at: int | None = None, ttl_ms: int | None = None,
-             attachments: list | None = None) -> dict:
+             attachments: list | None = None,
+             idempotency_key: str | None = None) -> dict:
         """Send an encrypted wire.
 
         ``thread_id`` / ``reply_to`` / ``priority`` are conversation metadata
@@ -228,9 +229,18 @@ class TelegraphClient:
         existing per-byte token formula (a big file is just an expensive wire).
         The recipient must advertise ATTACHMENTS_CAPABILITY, else the send is
         refused (files are content, never silently dropped).
+
+        ``idempotency_key`` is a client-chosen string (<=128 chars) that makes a
+        retried send collapse to the first delivery instead of a second wire and
+        a second charge. The result carries ``idempotent: True`` when the relay
+        recognized the key. A relay that predates the feature ignores the field.
         """
         if not isinstance(text, str):
             raise ValueError("text must be a string")
+        if idempotency_key is not None and (
+            not isinstance(idempotency_key, str) or not (0 < len(idempotency_key) <= 128)
+        ):
+            raise ValueError("idempotency_key must be a non-empty string up to 128 chars")
         if expires_at is None and ttl_ms is not None:
             if not isinstance(ttl_ms, int) or isinstance(ttl_ms, bool) or ttl_ms <= 0:
                 raise ValueError("ttl_ms must be a positive integer (milliseconds)")
@@ -292,7 +302,7 @@ class TelegraphClient:
         # can't read this one either.
         sent_copy = crypto.encrypt(plaintext, self.identity["boxPublicKey"], self.identity["boxSecretKey"])
 
-        r = self._req("POST", "/v1/messages", {
+        body = {
             "to": recipient["address"],
             "from": self.identity["address"],
             "nonce": sealed["nonce"],
@@ -300,12 +310,16 @@ class TelegraphClient:
             "ts": ts,
             "sig": sig,
             "sentCopy": sent_copy,
-        })
+        }
+        if idempotency_key is not None:
+            body["idempotencyKey"] = idempotency_key
+        r = self._req("POST", "/v1/messages", body)
         out = {
             "id": r.get("id"),
             "to": recipient["address"],
             "toHandle": recipient.get("handle"),
             "duplicate": r.get("duplicate", False),
+            "idempotent": r.get("idempotent", False),
             "tokens": r.get("tokens"),
             "charged": r.get("charged"),
             "credits": r.get("credits"),

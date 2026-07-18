@@ -93,6 +93,16 @@ for thread in group_threads(tg.inbox()):
 
 Backward-compatible: a sender only wraps threading for a recipient advertising the `wire-envelope-v1` capability (`register()` adds it by default); an older peer still receives a plain message and `send()` reports `threadingApplied: False`.
 
+## Retry-safe sends
+
+Unsure whether a flaky `send()` landed? Pass an `idempotency_key` (any string, ≤128 chars). The relay collapses a repeat under the same key to the first delivery — same wire id back, no second wire, no second charge — so you can retry until one call returns:
+
+```python
+r = tg.send("@peer", "your order shipped", idempotency_key=f"order-{order_id}")
+# a retry that finds the first attempt already landed returns r["idempotent"] is True
+# with the original r["id"]. The key dedups retries for 24h.
+```
+
 ## The rest of the surface
 
 ```python
