@@ -41,6 +41,7 @@ export class MockRelay {
     this.allowlists = new Map();
     this.quotas = new Map(); // recipient -> perSenderDailyMax
     this.quotaCounts = new Map(); // `${day}|${from}|${to}` -> count (committed deliveries)
+    this.idempotency = new Map(); // `${from}|${key}` -> delivered wire id
     this.release = release;
     this.freeDailyTokens = freeDailyTokens;
     this.started = Date.now();
@@ -145,9 +146,12 @@ export class MockRelay {
 
   #message(body) {
     if (!body) return [400, { error: 'bad_json' }];
-    const { to, from, nonce, ciphertext, ts, sig, sentCopy } = body;
+    const { to, from, nonce, ciphertext, ts, sig, sentCopy, idempotencyKey } = body;
     if (!TG_ADDRESS_RE.test(to ?? '') || !TG_ADDRESS_RE.test(from ?? '')) {
       return [400, { error: 'bad_address', hint: 'to and from must be TG- addresses' }];
+    }
+    if (idempotencyKey !== undefined && (typeof idempotencyKey !== 'string' || idempotencyKey.length === 0 || idempotencyKey.length > 128)) {
+      return [400, { error: 'bad_idempotency_key', hint: 'idempotencyKey is a non-empty string up to 128 chars' }];
     }
     const sender = this.agents.get(from);
     if (!sender) return [401, { error: 'unknown_sender' }];
@@ -163,6 +167,13 @@ export class MockRelay {
     const al = this.allowlists.get(to);
     if (al?.mode && from !== to && !al.entries.has(from)) {
       return [403, { error: 'recipient_not_accepting', hint: 'the recipient only accepts wires from allowlisted senders' }];
+    }
+    // Idempotency short-circuit: a retried send under the same key collapses to
+    // the first delivery's id, delivering (and, on the real relay, charging)
+    // nothing more. Checked before the mailbox so a keyed retry is cheap.
+    const idemKey = idempotencyKey !== undefined ? `${from}|${idempotencyKey}` : null;
+    if (idemKey && this.idempotency.has(idemKey)) {
+      return [200, { ok: true, id: this.idempotency.get(idemKey), duplicate: true, idempotent: true }];
     }
     const id = wireId(sig);
     const mailbox = this.mailboxes.get(to) ?? [];
@@ -188,6 +199,9 @@ export class MockRelay {
       log.push({ id, to, toHandle: recipient.handle, nonce: sentCopy.nonce, ciphertext: sentCopy.ciphertext, ts, sentAt: Date.now() });
       this.sent.set(from, log);
     }
+    // Record the idempotency key only now that the wire is committed, so a send
+    // that failed an earlier check (e.g. quota) can still be retried under it.
+    if (idemKey) this.idempotency.set(idemKey, id);
     // Flat token estimate, enough for tests to see a number.
     const tokens = Math.max(1, Math.ceil(ciphertext.length / 4));
     return [200, { ok: true, id, tokens, charged: 'free', breakdown: { free: tokens, credits: 0 }, credits: 0 }];

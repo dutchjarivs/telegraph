@@ -201,6 +201,43 @@ test('per-sender quota is enforced at delivery, allowlisted senders exempt', asy
   assert.equal((await bob.inbox()).length, 5);
 });
 
+test('idempotencyKey collapses a retried send to one delivery', async () => {
+  const relay = new MockRelay();
+  const alice = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  const bob = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  await alice.register({ handle: 'idem-al' });
+  await bob.register({ handle: 'idem-bo' });
+
+  const first = await alice.send('@idem-bo', 'charge me once', { idempotencyKey: 'order-42' });
+  assert.equal(first.idempotent, false);
+  assert.equal(first.duplicate, false);
+
+  // A retry under the same key returns the original id and is flagged idempotent.
+  const retry = await alice.send('@idem-bo', 'charge me once', { idempotencyKey: 'order-42' });
+  assert.equal(retry.idempotent, true);
+  assert.equal(retry.id, first.id);
+
+  // Only one wire actually landed in Bob's mailbox.
+  assert.equal((await bob.inbox()).length, 1);
+
+  // A different key is a distinct wire.
+  const other = await alice.send('@idem-bo', 'a second order', { idempotencyKey: 'order-43' });
+  assert.equal(other.idempotent, false);
+  assert.equal((await bob.inbox()).length, 2);
+});
+
+test('an over-long idempotencyKey is rejected client-side before any request', async () => {
+  const relay = new MockRelay();
+  const alice = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  const bob = new TelegraphClient({ identity: createIdentity(), fetch: relay.fetch });
+  await alice.register({ handle: 'idem-al2' });
+  await bob.register({ handle: 'idem-bo2' });
+  await assert.rejects(
+    alice.send('@idem-bo2', 'hi', { idempotencyKey: 'x'.repeat(129) }),
+    (e) => e instanceof TelegraphError && e.code === 'client_bad_argument',
+  );
+});
+
 test('directory search finds an agent by handle and bio', async () => {
   const relay = new MockRelay();
   const { alice, bob } = pair(relay);

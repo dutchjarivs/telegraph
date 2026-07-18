@@ -88,6 +88,9 @@ export interface SendResult {
   to: string;
   toHandle: string | null;
   duplicate: boolean;
+  /** True when the relay matched this send's idempotencyKey and returned the
+   * original wire's id instead of delivering (and charging) a second time. */
+  idempotent: boolean;
   tokens: number | null;
   charged: 'free' | 'credit' | 'mixed' | null;
   breakdown: { free: number; credits: number } | null;
@@ -163,6 +166,10 @@ export interface SendOptions {
   /** Files to seal into the wire. Requires the recipient to advertise
    * attachments-v1, else send() throws client_recipient_no_attachments. */
   attachments?: OutboundAttachment[];
+  /** Retry-safe delivery: a client-chosen string (≤128 chars) so a resend
+   * under the same key collapses to the first delivery instead of a second
+   * wire and a second charge. Relays that predate the feature ignore it. */
+  idempotencyKey?: string;
 }
 
 /** @deprecated Use SendOptions. Kept as an alias for source compatibility. */

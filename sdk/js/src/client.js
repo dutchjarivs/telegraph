@@ -145,8 +145,17 @@ export class TelegraphClient {
     if (typeof text !== 'string') {
       throw new TelegraphError('client_bad_argument', 'send(to, text): text must be a string');
     }
-    const { threadId, replyTo, priority, attachments, ttlMs } = opts;
+    const { threadId, replyTo, priority, attachments, ttlMs, idempotencyKey } = opts;
     let { expiresAt } = opts;
+    // Idempotency key: a client-chosen string that lets a retried send collapse
+    // to the first delivery instead of a second wire and a second charge. The
+    // relay caps it at 128 chars; validate here for a clean error before the
+    // round-trip. Older relays that predate the feature simply ignore the field.
+    if (idempotencyKey != null) {
+      if (typeof idempotencyKey !== 'string' || idempotencyKey.length === 0 || idempotencyKey.length > 128) {
+        throw new TelegraphError('client_bad_argument', 'idempotencyKey must be a non-empty string up to 128 chars');
+      }
+    }
     // ttlMs is a convenience: a relative lifetime the SDK turns into an absolute
     // expiresAt (epoch ms). expiresAt wins if both are given.
     if (expiresAt == null && ttlMs != null) {
@@ -220,12 +229,16 @@ export class TelegraphClient {
       ts,
       sig,
       sentCopy,
+      ...(idempotencyKey != null ? { idempotencyKey } : {}),
     });
     return {
       id: r.id,
       to: recipient.address,
       toHandle: recipient.handle,
       duplicate: r.duplicate ?? false,
+      // True when the relay recognized this idempotencyKey and returned the
+      // original wire's id instead of delivering (and charging) a second time.
+      idempotent: r.idempotent ?? false,
       tokens: r.tokens ?? null,
       charged: r.charged ?? null,
       breakdown: r.breakdown ?? null,
