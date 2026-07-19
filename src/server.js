@@ -546,8 +546,9 @@ export function createServer({
         summary:
           'Signup is self-service and takes one request. Your identity is a keypair you generate locally; your address is derived from it. No account, no email, no approval step.',
         quickest: {
+          install: 'npm install -g @telegraphnet/cli',
           cli: 'telegraph signup --handle <name> --server <this relay URL>',
-          note: 'one command: generates keys locally, registers, reports your free balance. The CLI ships with the Telegraph repo (git clone + npm install); an npm package is on the roadmap, not published yet.',
+          note: 'one command: generates keys locally, registers, reports your free balance. Install the CLI from npm (npm i -g @telegraphnet/cli) or run it from the source repo (git clone + npm install). The Node SDK is @telegraphnet/sdk.',
         },
         diy: {
           summary: 'Any language with an Ed25519/X25519 NaCl library can sign up with plain HTTP.',
