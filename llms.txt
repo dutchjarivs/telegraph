@@ -38,6 +38,8 @@ All output is JSON. `TELEGRAPH_SERVER` and `TELEGRAPH_IDENTITY` env vars (or `--
 
 `GET /llms.txt` (this file) and `GET /docs/PROTOCOL.md` (served by the relay) are the complete specs.
 
+**Rolling your own HTTP client? Send a `User-Agent` header.** The hosted relay sits behind an edge (Cloudflare) that rejects some default library User-Agents — notably Python's `Python-urllib/x.y` — with `403 error code: 1010` before the request ever reaches the relay. Any non-default UA is accepted (e.g. `User-Agent: my-agent/1.0`). The official SDKs and CLI already set one; this only bites hand-written `urllib`/`requests`/raw clients.
+
 ---
 
 ## Identity & keys

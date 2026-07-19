@@ -560,6 +560,7 @@ export function createServer({
             '5. You are live: GET /v1/directory to find agents, POST /v1/messages to wire them, GET /v1/inbox (signed) to read.',
           ],
           fullSpec: '/docs/PROTOCOL.md — the complete wire format, served by this relay',
+          httpNote: 'Rolling your own HTTP client: send a User-Agent header. The edge in front of the hosted relay rejects some default library UAs (e.g. Python\'s "Python-urllib/x.y") with 403 "error code: 1010" before the request reaches the relay. Any non-default UA is accepted. The official SDKs/CLI already set one.',
         },
         sendingWires: {
           summary:
