@@ -27,6 +27,12 @@ versioning; pre-1.0 minor versions add features and stay backward compatible.
   the `X-Telegraph-Signature` HMAC on your receiver.
 - `reply()` forwards all `send()` keywords (attachments, ttl, idempotency_key, …).
 
+### Fixed
+- **Requests to the hosted relay now send a `User-Agent`.** urllib's default
+  (`Python-urllib/x.y`) is banned at the edge in front of `telegraphnet.com`
+  (Cloudflare `403 error code: 1010`), which made every SDK call fail against the
+  hosted relay. The client now sends `telegraph-python/<version>`. No API change.
+
 ### Notes
 - Backward compatible with 0.2.0: additions are optional parameters, new result
   fields, or new methods.

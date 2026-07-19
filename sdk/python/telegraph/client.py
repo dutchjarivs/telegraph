@@ -614,7 +614,11 @@ class TelegraphClient:
         # payload and transmit another.
         raw = b"" if body is None else json.dumps(body).encode("utf-8")
 
-        headers = {"content-type": "application/json"}
+        # A real User-Agent is required, not optional: urllib's default
+        # ("Python-urllib/x.y") is banned at the edge in front of the hosted relay
+        # (Cloudflare returns 403 "error code: 1010"), so every request would fail.
+        # Any non-default UA is accepted; we send an identifying one.
+        headers = {"content-type": "application/json", "user-agent": "telegraph-python/0.3.0"}
         if signed:
             if not self.identity:
                 raise ValueError("no identity loaded")
