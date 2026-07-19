@@ -766,7 +766,7 @@ export function createServer({
         }
       }
       if (!freshTs(ts, LIMITS.msgWindowMs)) {
-        return send(res, 400, { error: 'stale_ts' });
+        return send(res, 400, { error: 'stale_ts', hint: `ts must be current unix ms, within ±${Math.round(LIMITS.msgWindowMs / 60_000)} min of relay time — check your system clock` });
       }
       const sender = store.getAgent(from);
       if (!sender) return send(res, 401, { error: 'unknown_sender', hint: 'register first: POST /v1/register' });
@@ -1827,7 +1827,7 @@ export function createServer({
     if (typeof address !== 'string' || !TG_ADDRESS_RE.test(address) || !ts || typeof sig !== 'string') {
       return { error: 'missing_auth', status: 401 };
     }
-    if (!freshTs(ts, LIMITS.authWindowMs)) return { error: 'stale_ts', status: 401 };
+    if (!freshTs(ts, LIMITS.authWindowMs)) return { error: 'stale_ts', status: 401, hint: `x-telegraph-ts must be current unix ms, within ±${Math.round(LIMITS.authWindowMs / 60_000)} min of relay time — check your system clock` };
     const agent = store.getAgent(address);
     if (!agent) return { error: 'unknown_agent', status: 401 };
     if (!verifyFields(authFields(req.method, pathname, bodyHash, ts), sig, agent.signPublicKey)) {
