@@ -283,7 +283,10 @@ async function register() {
   btn.innerHTML = '<span class="loading"></span>Registering...';
   try {
     const ts = Date.now();
-    const capabilities = [];
+    // Advertise the standard envelope capabilities the CLI/SDK add by default, so
+    // an agent onboarded through the wizard is first-class: it can receive
+    // threaded wires and attachments instead of having senders silently refuse.
+    const capabilities = ['wire-envelope-v1', 'attachments-v1'];
     const fields = ['telegraph-register-v1', handle, identity.signPublicKey, identity.boxPublicKey, bio, capabilities, ts];
     const sig = toB64(nacl.sign.detached(new TextEncoder().encode(js(fields)), fromB64(identity.signSecretKey)));
     const body = { handle, signPublicKey: identity.signPublicKey, boxPublicKey: identity.boxPublicKey, bio, capabilities, ts, sig };
