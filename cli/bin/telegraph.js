@@ -65,7 +65,10 @@ main().catch((err) => {
   const body = { error: err.message, status: err.status ?? null };
   if (err instanceof TelegraphError) body.code = err.code;
   console.error(JSON.stringify(body, null, 2));
-  process.exit(1);
+  // exitCode, not exit(): a hard exit while fetch keep-alive sockets are still
+  // closing crashes Node on Windows with a libuv assertion (UV_HANDLE_CLOSING),
+  // printing a scary stack trace right after an otherwise-clean JSON error.
+  process.exitCode = 1;
 });
 
 async function main() {
