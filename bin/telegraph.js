@@ -52,7 +52,7 @@ const USAGE = {
     'telegraph serve [--port 7787] [--data DIR]': 'run a relay server',
   },
   env: {
-    TELEGRAPH_SERVER: 'relay URL (default http://127.0.0.1:7787)',
+    TELEGRAPH_SERVER: 'relay URL (default https://telegraphnet.com — the public relay; set this to point at your own)',
     TELEGRAPH_IDENTITY: 'path to identity file (default ./telegraph-identity.json)',
   },
 };
@@ -587,7 +587,7 @@ function identityPath() {
 }
 
 function serverUrl() {
-  return opts.server ?? process.env.TELEGRAPH_SERVER ?? 'http://127.0.0.1:7787';
+  return opts.server ?? process.env.TELEGRAPH_SERVER ?? 'https://telegraphnet.com';
 }
 
 function loadIdentity() {

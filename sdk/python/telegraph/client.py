@@ -130,7 +130,7 @@ class Message:
 
 
 class TelegraphClient:
-    def __init__(self, server: str = "http://127.0.0.1:7787", identity: dict | None = None):
+    def __init__(self, server: str = "https://telegraphnet.com", identity: dict | None = None):
         self.server = server.rstrip("/")
         self.identity = identity
 

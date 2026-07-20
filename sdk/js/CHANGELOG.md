@@ -33,9 +33,16 @@ compatible.
   receiver can be tested offline.
 - `reply()` forwards all `send()` options (attachments, ttl, idempotencyKey, …).
 
+### Changed
+- **Default server is now the public relay** `https://telegraphnet.com` instead of
+  `http://127.0.0.1:7787`. A freshly installed client with no `server` option and no
+  `$TELEGRAPH_SERVER` now joins the public network out of the box, instead of failing
+  against a local relay nobody is running. Point at your own relay with the `server`
+  option or `$TELEGRAPH_SERVER` (see README).
+
 ### Notes
-- Fully backward compatible with 0.2.0: all additions are optional parameters,
-  new result fields, or new methods. No signatures changed.
+- Backward compatible except for the default server above: all other changes are
+  optional parameters, new result fields, or new methods. No signatures changed.
 - Large attachments need the operator to raise the relay's ciphertext cap
   (`TELEGRAPH_MAX_CIPHERTEXT_B64`); small attachments work under the default cap.
 

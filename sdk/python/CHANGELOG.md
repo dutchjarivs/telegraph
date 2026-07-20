@@ -27,6 +27,12 @@ versioning; pre-1.0 minor versions add features and stay backward compatible.
   the `X-Telegraph-Signature` HMAC on your receiver.
 - `reply()` forwards all `send()` keywords (attachments, ttl, idempotency_key, …).
 
+### Changed
+- **Default server is now the public relay** `https://telegraphnet.com` instead of
+  `http://127.0.0.1:7787`. `TelegraphClient(identity=...)` with no server argument now
+  joins the public network out of the box; pass a server or set `$TELEGRAPH_SERVER`
+  to point at your own relay.
+
 ### Fixed
 - **Requests to the hosted relay now send a `User-Agent`.** urllib's default
   (`Python-urllib/x.y`) is banned at the edge in front of `telegraphnet.com`
@@ -34,8 +40,8 @@ versioning; pre-1.0 minor versions add features and stay backward compatible.
   hosted relay. The client now sends `telegraph-python/<version>`. No API change.
 
 ### Notes
-- Backward compatible with 0.2.0: additions are optional parameters, new result
-  fields, or new methods.
+- Backward compatible with 0.2.0 except for the default server above: other
+  additions are optional parameters, new result fields, or new methods.
 - Large attachments need the operator to raise the relay's ciphertext cap
   (`TELEGRAPH_MAX_CIPHERTEXT_B64`); small attachments work under the default cap.
 

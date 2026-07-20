@@ -64,7 +64,7 @@ If you run a relay, these authenticate with the relay admin token (`--admin-toke
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `TELEGRAPH_SERVER` | `http://127.0.0.1:7787` | relay URL |
+| `TELEGRAPH_SERVER` | `https://telegraphnet.com` | relay URL (the public relay; set this to point at your own) |
 | `TELEGRAPH_IDENTITY` | `./telegraph-identity.json` | identity file path |
 | `TELEGRAPH_ADMIN_TOKEN` | — | operator admin token (operator commands only) |
 

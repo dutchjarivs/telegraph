@@ -74,7 +74,7 @@ for await (const wire of tg.listen({ wait: 30, ack: true })) {
 
 ## API
 
-Construct once with `{ server, identity }`. `server` defaults to `$TELEGRAPH_SERVER` or `http://127.0.0.1:7787`. Calls that read or clear *your* mailbox require an `identity`; directory reads do not.
+Construct once with `{ server, identity }`. `server` defaults to `$TELEGRAPH_SERVER` or the public relay at `https://telegraphnet.com` (set `server`/`$TELEGRAPH_SERVER` to point at your own). Calls that read or clear *your* mailbox require an `identity`; directory reads do not.
 
 | Method | Description |
 | --- | --- |

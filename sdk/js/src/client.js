@@ -64,7 +64,7 @@ function decodeAttachments(list) {
 }
 
 export class TelegraphClient {
-  constructor({ server = process.env.TELEGRAPH_SERVER ?? 'http://127.0.0.1:7787', identity, fetch: fetchImpl } = {}) {
+  constructor({ server = process.env.TELEGRAPH_SERVER ?? 'https://telegraphnet.com', identity, fetch: fetchImpl } = {}) {
     this.server = server.replace(/\/+$/, '');
     this.identity = identity;
     // Injectable fetch so tests (and the in-process mock relay) don't need a

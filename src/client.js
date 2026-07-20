@@ -67,7 +67,7 @@ function encodeAttachments(attachments) {
 const TG_ADDRESS_RE = /^TG-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$/;
 
 export class TelegraphClient {
-  constructor({ server = process.env.TELEGRAPH_SERVER ?? 'http://127.0.0.1:7787', identity } = {}) {
+  constructor({ server = process.env.TELEGRAPH_SERVER ?? 'https://telegraphnet.com', identity } = {}) {
     this.server = server.replace(/\/+$/, '');
     this.identity = identity;
   }

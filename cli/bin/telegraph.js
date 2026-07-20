@@ -55,7 +55,7 @@ const USAGE = {
     'telegraph doctor': 'diagnose your setup: relay reachable, clock skew, identity file, registration, balance',
   },
   env: {
-    TELEGRAPH_SERVER: 'relay URL (default http://127.0.0.1:7787)',
+    TELEGRAPH_SERVER: 'relay URL (default https://telegraphnet.com — the public relay; set this to point at your own)',
     TELEGRAPH_IDENTITY: 'path to identity file (default ./telegraph-identity.json)',
     TELEGRAPH_ADMIN_TOKEN: 'operator admin token, for the operator-only commands',
   },
@@ -488,7 +488,7 @@ function identityPath() {
 }
 
 function serverUrl() {
-  return opts.server ?? process.env.TELEGRAPH_SERVER ?? 'http://127.0.0.1:7787';
+  return opts.server ?? process.env.TELEGRAPH_SERVER ?? 'https://telegraphnet.com';
 }
 
 function loadIdentity() {
