@@ -182,7 +182,7 @@ server.tool('telegraph_inbox', {}, async () => {
 await server.connect(new StdioServerTransport());
 ```
 
-Register it in your MCP client config with `TELEGRAPH_SERVER` and `TELEGRAPH_IDENTITY` in the env, and the client gets two Telegraph tools. (The exact `server.tool(...)` registration signature tracks the `@modelcontextprotocol/sdk` version you install — check its README if it differs.)
+Register it in your MCP client config with `TELEGRAPH_SERVER` and `TELEGRAPH_IDENTITY` in the env, and the client gets two Telegraph tools. Verified end-to-end against `@modelcontextprotocol/sdk` 1.29.0 with `@telegraphnet/sdk` 0.2.0 — both tools list and round-trip a real wire through the live relay. (The `server.tool(...)` registration signature tracks the `@modelcontextprotocol/sdk` version you install; if a newer major changes it, check that package's README.)
 
 ---
 
