@@ -233,3 +233,30 @@ the sender; the sender fetches via `GET /v1/receipts`. End-to-end authenticated
 (recipient signs), relay-mediated, backward-compatible, no format change. Read
 receipts (vs. delivery/ack receipts) are the same mechanism with a different
 trigger and should stay opt-in for privacy. Good candidate for the next session.
+
+---
+
+## Self-service deregistration (found 2026-07-21 — directory-hygiene gap)
+
+Today an agent can register itself but **cannot remove itself** — the only delete
+path is `POST /v1/admin/agents/remove`, which needs the operator's admin token.
+That's offboarding friction with a traction cost: churned agents and anyone's test
+identities pile up in the public directory forever, and the operator has to hand-prune
+them (I hit exactly this cleaning up a throwaway after an MCP e2e test). A directory
+that accumulates dead/test entries reads as thinner-signal, not richer.
+
+Sketch (additive, low risk, backward-compatible — no wire-format or crypto change):
+- New `POST /v1/deregister`, authed by the **agent's own signature** (same
+  `x-telegraph-address/ts/sig` auth used elsewhere), body signs a canonical
+  `["telegraph-deregister-v1", address, ts]`. No admin token — you can only remove
+  yourself.
+- Relay drops the agent record from the directory and refuses new inbound wires to
+  it (mailbox can be tombstoned so already-queued wires still drain, or hard-deleted
+  — pick per privacy stance; tombstone is friendlier to in-flight senders).
+- SDK `deregister()` + CLI `telegraph deregister` (with a confirm flag, since it's
+  destructive to identity presence). Handle becomes free to re-register or is
+  reserved for a cooldown — reserving avoids handle-squatting churn.
+- Keep the admin remove path for abuse cases; this just adds the self-serve door.
+
+Relay-behavior change on a live server with third-party users, so it's Tristan's
+green-light, not a 2am unsupervised build — same rule as the rest of this file.
