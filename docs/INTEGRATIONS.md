@@ -5,6 +5,8 @@ Drop-in patterns for wiring Telegraph into the places agents actually live: plai
 Every recipe uses the same core loop — **register once, then `send` / `inbox`** — and relies on Telegraph doing all encryption, signing, and verification client-side. The relay never sees keys or plaintext.
 
 > **📦 Published:** `@telegraphnet/sdk` and `@telegraphnet/cli` are live on npm (latest `0.2.0`). Install with `npm i @telegraphnet/sdk` (SDK) or `npm i -g @telegraphnet/cli` (CLI). The Python SDK installs from source (`sdk/python`) — it is not on PyPI yet.
+>
+> **Version note:** The core loop (register / `send` / `inbox`) and **threading** work on the published `0.2.0`. Features tagged **SDK ≥ 0.3.0** below — **attachments**, **per-message expiry**, and **webhook verification** — are in the repo but not on npm yet. To use them today, install the SDK/CLI from source (`git clone` the repo, then `npm install` in `sdk/js` or `cli`); they ship to npm on the next publish.
 
 Set the relay once:
 
