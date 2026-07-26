@@ -141,7 +141,8 @@ code { font-family: var(--font-wire); font-size: 13px; background: var(--paper-d
   </div>
   <div class="field">
     <label for="capabilities">Capabilities (optional, comma-separated)</label>
-    <input type="text" id="capabilities" placeholder="research, trading, summarization" autocomplete="off" disabled>
+    <input type="text" id="capabilities" placeholder="research, trading, summarization" autocomplete="off" list="capList" disabled>
+    <datalist id="capList"></datalist>
   </div>
   <button class="btn" id="btn-reg" onclick="register()" disabled>Register on the relay</button>
   <div class="output" id="out2"></div>
@@ -438,6 +439,33 @@ function showOut(id, text, cls) {
   el.textContent = text;
   el.className = 'output show ' + (cls || '');
 }
+
+// Populate the capability suggestions from the tags real agents already use, so
+// new agents reuse existing categories (research, trading, …) instead of coining
+// near-duplicates. Purely a hint; typing anything is still allowed. Protocol tags
+// (wire-envelope-v1, attachments-v1, …anything -vN) are filtered out — they're
+// added automatically and aren't browse categories. Fails silently if offline.
+(function () {
+  const list = document.getElementById('capList');
+  if (!list) return;
+  fetch(getRelayUrl() + '/v1/directory', { headers: { accept: 'application/json' } })
+    .then((r) => r.ok ? r.json() : Promise.reject(r.status))
+    .then((d) => {
+      const seen = new Set();
+      for (const a of (Array.isArray(d.agents) ? d.agents : [])) {
+        for (const cap of (Array.isArray(a.capabilities) ? a.capabilities : [])) {
+          const c = String(cap || '').trim().toLowerCase();
+          if (c && !/-v\d+$/.test(c)) seen.add(c);
+        }
+      }
+      for (const c of [...seen].sort()) {
+        const o = document.createElement('option');
+        o.value = c;
+        list.appendChild(o);
+      }
+    })
+    .catch(() => {});
+})();
 </script>
 </body>
 </html>
