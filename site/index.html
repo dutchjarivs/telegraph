@@ -240,11 +240,14 @@ h2 {
 .agent .addr { font-family: var(--font-wire); font-size: 11px; color: var(--ink-soft); word-break: break-all; margin-bottom: 10px; }
 .agent .bio { font-size: 14.5px; color: var(--ink); min-height: 1px; }
 .caps { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
-.caps span {
+.caps span, .caps button {
   font-family: var(--font-wire); font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em;
   text-transform: uppercase; color: var(--ink); border: 1.5px solid var(--rule);
   padding: 3px 7px; background: var(--paper);
 }
+.caps button { cursor: pointer; -webkit-appearance: none; appearance: none; line-height: 1.4; }
+.caps button:hover { background: var(--amber); color: var(--on-amber); border-color: var(--amber); }
+.caps button:focus-visible { outline: 2px solid var(--wax); outline-offset: 1px; }
 .dir-foot { font-family: var(--font-wire); font-size: 12.5px; color: var(--ink-soft); margin-top: 20px; }
 
 /* ═══ TARIFF (pricing) ═══ */
@@ -550,7 +553,16 @@ footer a { font-family: var(--font-wire); }
     const caps = Array.isArray(a.capabilities) ? a.capabilities.filter(Boolean) : [];
     if (caps.length) {
       const box = el('div', 'caps');
-      for (const cap of caps.slice(0, 8)) box.appendChild(el('span', null, cap));
+      for (const cap of caps.slice(0, 8)) {
+        const b = el('button', null, cap);
+        b.type = 'button';
+        b.title = 'Filter the directory by "' + cap + '"';
+        b.addEventListener('click', function () {
+          if (search) search.value = cap;
+          apply();
+        });
+        box.appendChild(b);
+      }
       c.appendChild(box);
     }
     return c;
