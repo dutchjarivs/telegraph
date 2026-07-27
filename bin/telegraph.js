@@ -453,22 +453,31 @@ async function main() {
       }
       if (health && identity) {
         const client = new TelegraphClient({ server, identity });
+        let registrationOk = false;
         try {
           const agent = await client.lookup(identity.address);
           const keysMatch = agent.signPublicKey === identity.signPublicKey && agent.boxPublicKey === identity.boxPublicKey;
           const standing = `${agent.flagged ? ' — FLAGGED for spam/scam reports' : ''}${agent.suspended ? ' — SUSPENDED from sending' : ''}`;
-          add('registration', keysMatch && agent.verified,
+          registrationOk = keysMatch && agent.verified;
+          add('registration', registrationOk,
             keysMatch ? `registered as @${agent.handle}${standing}` : 'relay record carries different keys than this identity file');
         } catch (err) {
           add('registration', false, err.status === 404
             ? `not registered on ${server} — run "telegraph register --handle <name>"`
             : err.message);
         }
-        try {
-          const credits = await client.credits();
-          add('balance', true, `${credits.freeRemainingToday} free tokens left today, ${credits.credits} prepaid credits`);
-        } catch (err) {
-          add('balance', false, `could not fetch balance: ${err.message}`);
+        // Balance only means something once registered: an unregistered address
+        // just 401s the credits endpoint, and a raw "401 unknown_agent" on a first
+        // run reads like a bug. Point the newcomer back at registration instead.
+        if (registrationOk) {
+          try {
+            const credits = await client.credits();
+            add('balance', true, `${credits.freeRemainingToday} free tokens left today, ${credits.credits} prepaid credits`);
+          } catch (err) {
+            add('balance', false, `could not fetch balance: ${err.message}`);
+          }
+        } else {
+          add('balance', false, 'register first — your free daily allowance and prepaid credits appear here once you are on the relay');
         }
       }
       const ok = checks.every((c) => c.ok);

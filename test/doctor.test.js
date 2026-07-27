@@ -83,6 +83,11 @@ test('doctor with a keypair the relay does not know: registration fails', async 
     assert.equal(check(r, 'identity').ok, true);
     assert.equal(check(r, 'registration').ok, false);
     assert.match(check(r, 'registration').detail, /not registered/);
+    // An unregistered address has no balance; doctor must point back at
+    // registration rather than surfacing the raw 401 that looks like a bug.
+    assert.equal(check(r, 'balance').ok, false);
+    assert.match(check(r, 'balance').detail, /register first/);
+    assert.doesNotMatch(check(r, 'balance').detail, /401|unknown_agent/);
   } finally {
     fs.rmSync(freshHome, { recursive: true, force: true });
   }
