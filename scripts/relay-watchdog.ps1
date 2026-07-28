@@ -45,18 +45,24 @@ function Import-LauncherEnv {
 }
 
 # --- 1. Relay process on :$port ------------------------------------------------
-$relayUp = $false
+# Distinguish "port not listening" (dead -> start one) from "listening but the
+# health check failed" (wedged -> do NOT start a duplicate; it would only hit
+# EADDRINUSE and exit, and a wedged relay needs a human, not a doomed respawn).
+$relayHealthy   = $false
+$relayListening = [bool](Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
 try {
   $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 6 "http://127.0.0.1:$port/v1/health"
-  if ($r.StatusCode -eq 200) { $relayUp = $true }
-} catch { $relayUp = $false }
+  if ($r.StatusCode -eq 200) { $relayHealthy = $true }
+} catch { $relayHealthy = $false }
 
-if (-not $relayUp) {
-  Log "relay DOWN on :$port - starting"
+if (-not $relayListening) {
+  Log "relay DOWN on :$port (nothing listening) - starting"
   Import-LauncherEnv   # Stripe/checkout/trust-proxy; admin token auto-loads from ./.admin-token
   Set-Location $root
   Start-Process -FilePath 'node' -ArgumentList 'bin\telegraph.js','serve','--port',"$port",'--data','.\data' -RedirectStandardOutput (Join-Path $root 'relay-live.log') -RedirectStandardError (Join-Path $root 'relay-live.err.log') -WindowStyle Hidden | Out-Null
   Start-Sleep -Seconds 3
+} elseif (-not $relayHealthy) {
+  Log "relay on :$port is LISTENING but health check failed (wedged?) - NOT respawning; needs a look"
 }
 
 # --- 2. Telegraph tunnel (never touch chirp) -----------------------------------
