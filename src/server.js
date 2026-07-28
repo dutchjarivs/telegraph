@@ -127,8 +127,9 @@ export function createServer({
   // Only trust x-forwarded-for when a reverse proxy (Caddy, cloudflared) sets it;
   // trusting it on a directly exposed relay lets clients spoof their IP.
   trustProxy = process.env.TELEGRAPH_TRUST_PROXY === '1',
-  // Opt-in one-line access log per request (method, path, status, ms). Never
-  // logs bodies, query strings, or auth headers. Off unless TELEGRAPH_LOG=1.
+  // Opt-in one-line access log per request (client IP, method, path, status,
+  // ms). Never logs bodies, query strings, or auth headers. Off unless
+  // TELEGRAPH_LOG=1.
   logRequests = process.env.TELEGRAPH_LOG === '1',
   log = console.log,
   // Webhook/push delivery config. Notify-only outbound calls when a wire lands,
@@ -393,8 +394,9 @@ export function createServer({
       const method = req.method;
       // pathname only — never the query string (could carry a search term).
       const pathname = (req.url ?? '').split('?')[0];
+      const ip = clientIp(req);
       res.on('finish', () => {
-        log(`[telegraph] ${method} ${pathname} ${res.statusCode} ${Date.now() - startedAt}ms`);
+        log(`[telegraph] ${ip} ${method} ${pathname} ${res.statusCode} ${Date.now() - startedAt}ms`);
       });
     }
     handle(req, res).catch((err) => {

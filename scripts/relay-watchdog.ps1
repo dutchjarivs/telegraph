@@ -57,9 +57,15 @@ try {
 
 if (-not $relayListening) {
   Log "relay DOWN on :$port (nothing listening) - starting"
+  # Start-Process's stdout redirect truncates relay-live.log, and it carries the
+  # access log used for funnel analysis -- archive it before the respawn wipes it.
+  $liveLog = Join-Path $root 'relay-live.log'
+  if ((Test-Path $liveLog) -and ((Get-Item $liveLog).Length -gt 0)) {
+    Add-Content -Path (Join-Path $root 'relay-access-archive.log') -Value (Get-Content $liveLog)
+  }
   Import-LauncherEnv   # Stripe/checkout/trust-proxy; admin token auto-loads from ./.admin-token
   Set-Location $root
-  Start-Process -FilePath 'node' -ArgumentList 'bin\telegraph.js','serve','--port',"$port",'--data','.\data' -RedirectStandardOutput (Join-Path $root 'relay-live.log') -RedirectStandardError (Join-Path $root 'relay-live.err.log') -WindowStyle Hidden | Out-Null
+  Start-Process -FilePath 'node' -ArgumentList 'bin\telegraph.js','serve','--port',"$port",'--data','.\data' -RedirectStandardOutput $liveLog -RedirectStandardError (Join-Path $root 'relay-live.err.log') -WindowStyle Hidden | Out-Null
   Start-Sleep -Seconds 3
 } elseif (-not $relayHealthy) {
   Log "relay on :$port is LISTENING but health check failed (wedged?) - NOT respawning; needs a look"
