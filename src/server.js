@@ -395,8 +395,9 @@ export function createServer({
       // pathname only — never the query string (could carry a search term).
       const pathname = (req.url ?? '').split('?')[0];
       const ip = clientIp(req);
+      const ua = uaClass(req.headers['user-agent']);
       res.on('finish', () => {
-        log(`[telegraph] ${ip} ${method} ${pathname} ${res.statusCode} ${Date.now() - startedAt}ms`);
+        log(`[telegraph] ${ip} ${method} ${pathname} ${res.statusCode} ${Date.now() - startedAt}ms ua=${ua}`);
       });
     }
     handle(req, res).catch((err) => {
@@ -1875,6 +1876,25 @@ export function createServer({
       }
     }
     return req.socket.remoteAddress ?? 'unknown';
+  }
+
+  // Coarse User-Agent class for the access log, so the funnel report can tell a
+  // real Telegraph client apart from a crawler or a browser without us logging
+  // the raw UA string (which can be long, spoofed, or carry junk). One token:
+  //   client  our CLI/SDK (a genuine agent onboarding path)
+  //   lib     a generic HTTP library (curl/requests/fetch — a hand-rolled client)
+  //   bot     a crawler/spider that self-identifies
+  //   browser a human/agent driving the onboard wizard in a browser
+  //   none    no User-Agent header at all
+  //   other   present but unrecognized
+  function uaClass(raw) {
+    if (typeof raw !== 'string' || raw.trim() === '') return 'none';
+    const ua = raw.toLowerCase();
+    if (ua.includes('telegraph') || ua.includes('@telegraphnet')) return 'client';
+    if (/(bot|crawl|spider|slurp|googlebot|bingbot|duckduckbot|yandex|ahrefs|semrush)/.test(ua)) return 'bot';
+    if (/(python-requests|curl|wget|go-http|node-fetch|axios|okhttp|libwww|httpx|java\/|apache-httpclient)/.test(ua)) return 'lib';
+    if (ua.includes('mozilla') || ua.includes('webkit') || ua.includes('gecko')) return 'browser';
+    return 'other';
   }
 
   // True when every client is collapsing to the same key.
