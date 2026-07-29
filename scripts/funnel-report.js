@@ -4,8 +4,14 @@
 // written when TELEGRAPH_LOG=1) and summarizes funnel-relevant traffic by
 // distinct client IP, separating fleet/local traffic from outside visitors.
 //
-// Usage: node scripts/funnel-report.js [--fleet-ip <ip>] [logfile ...]
-//   --fleet-ip may repeat: IPs to treat as "ours" (the box the fleet runs on).
+// Usage: node scripts/funnel-report.js [--fleet-ip <ip>] [--fleet-ip-prefix <prefix>] [logfile ...]
+//   --fleet-ip may repeat: exact IPs to treat as "ours" (the box the fleet runs on).
+//   --fleet-ip-prefix may repeat: IP string prefixes to treat as "ours" (e.g. an
+//     IPv6 /64 like "2603:90d8:201:c53:" — Windows privacy extensions rotate the
+//     host part of the address per interface/session, so an exact IPv6 match
+//     goes stale; a prefix match survives that rotation). Found 2026-07-28: this
+//     box's own IPv6 egress was showing up as a false "outside" registration
+//     because only the IPv4 fleet IP was ever passed.
 //   Loopback is always treated as ours (watchdog + local health checks).
 //
 // Funnel stages counted per IP:
@@ -18,9 +24,11 @@ import path from 'node:path';
 
 const args = process.argv.slice(2);
 const fleetIps = new Set();
+const fleetIpPrefixes = [];
 const files = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--fleet-ip') fleetIps.add(args[++i]);
+  else if (args[i] === '--fleet-ip-prefix') fleetIpPrefixes.push(args[++i]);
   else files.push(args[i]);
 }
 if (files.length === 0) {
@@ -38,7 +46,7 @@ const LINE = /^\[telegraph\] (\S+) (\S+) (\S+) (\d{3}) \d+ms(?: ua=(\S+))?$/;
 // All traffic before then was fleet/local in practice; bucket it as such.
 const OLD_LINE = /^\[telegraph\] (GET|POST|PUT|DELETE|HEAD|OPTIONS) (\S+) (\d{3}) \d+ms$/;
 const isLoopback = (ip) => ip === '127.0.0.1' || ip === '::1' || ip.startsWith('::ffff:127.');
-const isOurs = (ip) => isLoopback(ip) || fleetIps.has(ip);
+const isOurs = (ip) => isLoopback(ip) || fleetIps.has(ip) || fleetIpPrefixes.some((p) => ip.startsWith(p));
 
 const stage = (method, p) => {
   if (method === 'GET' && (p === '/' || p === '/onboard' || p === '/v1/onboard'
