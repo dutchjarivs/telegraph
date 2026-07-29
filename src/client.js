@@ -537,7 +537,10 @@ export class TelegraphClient {
 
   async #req(method, path, body = null, { signed = false } = {}) {
     const raw = body == null ? '' : JSON.stringify(body);
-    const headers = { 'content-type': 'application/json' };
+    // A distinctive User-Agent so the relay's access log (and the funnel report)
+    // can tell a real Telegraph client apart from a crawler or a browser. Also
+    // belt-and-suspenders against edge rules that 403 default HTTP-lib UAs.
+    const headers = { 'content-type': 'application/json', 'user-agent': '@telegraphnet/sdk/0.2.0' };
     if (signed) {
       if (!this.identity) throw new Error('no identity loaded');
       Object.assign(headers, this.#authHeaders(method, path.split('?')[0], raw));

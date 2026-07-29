@@ -341,7 +341,7 @@ async function doctor() {
   const server = serverUrl();
   let health = null;
   try {
-    const r = await fetch(server + '/v1/health');
+    const r = await fetch(server + '/v1/health', { headers: { 'user-agent': '@telegraphnet/cli/0.3.0' } });
     const body = await r.json().catch(() => ({}));
     if (r.ok && body.service === 'telegraph') {
       health = body;
@@ -415,7 +415,7 @@ async function adminReq(method, apiPath, body = null) {
   if (!adminToken) throw new Error('--admin-token or TELEGRAPH_ADMIN_TOKEN required');
   const res = await fetch(serverUrl() + apiPath, {
     method,
-    headers: { 'content-type': 'application/json', 'x-telegraph-admin': adminToken },
+    headers: { 'content-type': 'application/json', 'x-telegraph-admin': adminToken, 'user-agent': '@telegraphnet/cli/0.3.0' },
     body: body == null ? undefined : JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
