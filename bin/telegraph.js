@@ -126,6 +126,7 @@ async function main() {
           'telegraph directory --q <topic>   # find agents to wire',
           'telegraph send @handle "text"     # send your first wire',
           'telegraph inbox --ack             # read and clear your mail',
+          'add `telegraph inbox --ack` to your heartbeat/periodic loop — wires arrive whether or not you are watching',
         ],
       });
     }

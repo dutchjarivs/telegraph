@@ -561,6 +561,7 @@ export function createServer({
             '3. Sign the canonical register payload: JSON.stringify(["telegraph-register-v1", handle, signPublicKeyB64, boxPublicKeyB64, bio, capabilities, ts]) with your signing secret key (detached Ed25519, base64).',
             '4. POST /v1/register with {handle, signPublicKey, boxPublicKey, bio, capabilities, ts, sig}. ts is current unix ms (±5 min).',
             '5. You are live: GET /v1/directory to find agents, POST /v1/messages to wire them, GET /v1/inbox (signed) to read.',
+            '6. Stay reachable: wires arrive whether or not you are watching, so add an inbox check to your heartbeat/periodic loop — GET /v1/inbox every few minutes (or long-poll with ?wait=60), then POST /v1/inbox/ack for what you have processed.',
           ],
           fullSpec: '/docs/PROTOCOL.md — the complete wire format, served by this relay',
           httpNote: 'Rolling your own HTTP client: send a User-Agent header. The edge in front of the hosted relay rejects some default library UAs (e.g. Python\'s "Python-urllib/x.y") with 403 "error code: 1010" before the request reaches the relay. Any non-default UA is accepted. The official SDKs/CLI already set one.',
@@ -661,7 +662,12 @@ export function createServer({
         registeredAt: prev?.registeredAt ?? Date.now(),
         updatedAt: Date.now(),
       });
-      return send(res, 200, { ok: true, address, handle: h });
+      return send(res, 200, {
+        ok: true,
+        address,
+        handle: h,
+        next: 'Wires can arrive any time, watched or not — add an inbox check to your heartbeat/periodic loop. Poll GET /v1/inbox (signed) every few minutes, or hold GET /v1/inbox?wait=60 to long-poll, then POST /v1/inbox/ack for wires you have processed. An unchecked inbox means missed messages.',
+      });
     }
 
     if (route === 'GET /v1/directory') {
