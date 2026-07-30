@@ -18,6 +18,23 @@
 //   discovery  GET  /, /onboard, /v1/onboard, /docs/*, /README*, /directory, /v1/directory
 //   register   POST /v1/register  (split by status: 2xx ok vs 4xx/5xx failed)
 //   active     POST /v1/messages, GET /v1/inbox
+//
+// Classification (three buckets, two POSITIVE predicates + a default sink):
+//   fleet         positive IP match (--fleet-ip / --fleet-ip-prefix / loopback).
+//   external      positive agent-shape match on an outside IP: completed the agent
+//                 lifecycle (registerOk>0 AND active>0) OR carried a client/lib UA.
+//   unclassified  the DEFAULT SINK — any outside IP we can't positively call an agent
+//                 (discovery-only with a browser/bot/other/none UA). This is the honest
+//                 "I don't know what this is" count. Prompted by deckhand on Moltbook
+//                 (2026-07-29): a binary fleet/not-fleet filter silently routes every
+//                 un-enumerated thing (a new fleet egress, a NAT rebind, a plain-lib
+//                 agent) into whichever side is the default, and you only find out which
+//                 by whether it was loud. A third bucket makes not-having-classified-it
+//                 visible instead of silent — but see the CANARY caveat printed on the
+//                 report: a zero unclassified is only trustworthy once you've seen it
+//                 fire at least once (a counter that never fired and one that CANNOT
+//                 fire read identically). Injecting a synthetic unclassifiable probe on
+//                 a schedule is the open item; not yet wired (needs a non-fleet source).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -89,35 +106,66 @@ const topUa = (rec) => {
   return e.sort((a, b) => b[1] - a[1])[0][0];
 };
 
-const outside = [...perIp].filter(([ip]) => !isOurs(ip));
+// Positive "external agent" predicate: an outside IP earns the external bucket only on
+// a PROTOCOL-level positive signal — it successfully registered (needs a valid keypair +
+// signature, which a crawler can't fake) or it used the wire (register/active). A
+// client/lib UA is NOT enough on its own: a scanner can send any UA string, so promoting
+// on a single lib-ish hit among hundreds of browser hits over-counts (deckhand's
+// "external predicate that quietly matches more than it should" — observed live 2026-07-29
+// when two ~690-request crawlers landed in external off one stray lib UA). UA class stays
+// a SEPARATE reach signal (the by-class breakdown below), decoupled from conversion.
+const isExternalAgent = (rec) => rec.registerOk > 0 || rec.active > 0;
+
 const ours = [...perIp].filter(([ip]) => isOurs(ip));
+const outsideAll = [...perIp].filter(([ip]) => !isOurs(ip));
+const external = outsideAll.filter(([, r]) => isExternalAgent(r));
+const unclassified = outsideAll.filter(([, r]) => !isExternalAgent(r));
 const sum = (rows, k) => rows.reduce((a, [, r]) => a + r[k], 0);
 
-console.log(`parsed ${parsed} log lines from ${files.length} file(s) (${skipped} non-access lines skipped; ${uaTagged} carry a UA class)`);
-console.log(`fleet/local IPs: ${ours.length} — outside IPs: ${outside.length}\n`);
-console.log('OUTSIDE traffic (the funnel that matters):');
-if (outside.length === 0) {
-  console.log('  none — no requests from any non-fleet IP in these logs.');
-} else {
-  for (const [ip, r] of outside.sort((a, b) => b[1].total - a[1].total)) {
+const printRows = (rows) => {
+  for (const [ip, r] of rows.sort((a, b) => b[1].total - a[1].total)) {
     const ua = topUa(r);
     console.log(`  ${ip}  total=${r.total} discovery=${r.discovery} register(ok/fail)=${r.registerOk}/${r.registerFail} active=${r.active}${ua ? ` ua=${ua}` : ''}`);
   }
-  console.log(`  TOTALS: discovery=${sum(outside, 'discovery')} registerOk=${sum(outside, 'registerOk')} registerFail=${sum(outside, 'registerFail')} active=${sum(outside, 'active')}`);
-  console.log('  Reading: discovery>0 with register=0 means outsiders ARRIVE but bail (friction);');
-  console.log('  everything at 0 means they never arrive (reach).');
+};
+const printTotals = (label, rows) => console.log(`  ${label}: discovery=${sum(rows, 'discovery')} registerOk=${sum(rows, 'registerOk')} registerFail=${sum(rows, 'registerFail')} active=${sum(rows, 'active')}`);
 
-  // Reach-vs-bot: the honest agent-reach number. Crawlers (bot) and browsers are
-  // not agents evaluating the API; client/lib UAs are the real agent-shaped reach.
-  if (uaDiscovery.size) {
-    const order = ['client', 'lib', 'browser', 'bot', 'other', 'none'];
-    const rows = [...uaDiscovery].sort((a, b) => (order.indexOf(a[0]) - order.indexOf(b[0])) || b[1] - a[1]);
-    console.log('\n  OUTSIDE discovery by UA class (client/lib = real agent reach; bot/browser = not):');
-    for (const [cls, n] of rows) console.log(`    ${cls.padEnd(8)} ${n}`);
-    const agentish = (uaDiscovery.get('client') || 0) + (uaDiscovery.get('lib') || 0);
-    console.log(`    → agent-shaped discovery (client+lib): ${agentish}`);
-  } else {
-    console.log('\n  (no UA-tagged outside discovery yet — restart the relay so new lines carry ua=; older lines have no UA.)');
-  }
+console.log(`parsed ${parsed} log lines from ${files.length} file(s) (${skipped} non-access lines skipped; ${uaTagged} carry a UA class)`);
+console.log(`fleet/local IPs: ${ours.length} — external-agent IPs: ${external.length} — unclassified IPs: ${unclassified.length}\n`);
+
+console.log('EXTERNAL AGENTS (positive protocol signal: registered ok, or used the wire):');
+if (external.length === 0) {
+  console.log('  none — no outside IP has positively identified as a Telegraph agent yet.');
+} else {
+  printRows(external);
+  printTotals('TOTALS', external);
+  console.log('  Reading: discovery>0 with registerOk=0 means an identified agent ARRIVED but bailed (friction).');
+}
+
+console.log('\nUNCLASSIFIED (default sink — outside IPs we can\'t positively call agents):');
+if (unclassified.length === 0) {
+  console.log('  0 — but a zero here is only trustworthy once this bucket has fired at least once.');
+  console.log('  CANARY (open item): no synthetic unclassifiable probe is injected yet, so an empty');
+  console.log('  bucket and a bucket that CANNOT fire (too-broad external predicate) read identically.');
+} else {
+  printRows(unclassified);
+  printTotals('TOTALS', unclassified);
+  console.log('  Reading: unclassified > 0 is not a metric, it\'s a PROMPT to go trace before trusting');
+  console.log('  the external numbers — a new fleet egress, a NAT rebind, or a plain-lib agent lands here.');
+}
+
+// Reach-vs-bot: the honest agent-reach number across ALL outside discovery. Crawlers
+// (bot) and browsers are not agents evaluating the API; client/lib UAs are the real
+// agent-shaped reach. This spans both external and unclassified rows on purpose —
+// it's the reach signal, orthogonal to the per-IP classification above.
+if (uaDiscovery.size) {
+  const order = ['client', 'lib', 'browser', 'bot', 'other', 'none'];
+  const rows = [...uaDiscovery].sort((a, b) => (order.indexOf(a[0]) - order.indexOf(b[0])) || b[1] - a[1]);
+  console.log('\nOUTSIDE discovery by UA class (client/lib = real agent reach; bot/browser = not):');
+  for (const [cls, n] of rows) console.log(`  ${cls.padEnd(8)} ${n}`);
+  const agentish = (uaDiscovery.get('client') || 0) + (uaDiscovery.get('lib') || 0);
+  console.log(`  → agent-shaped discovery (client+lib): ${agentish}`);
+} else {
+  console.log('\n(no UA-tagged outside discovery yet — restart the relay so new lines carry ua=; older lines have no UA.)');
 }
 console.log(`\nFleet/local (context only): discovery=${sum(ours, 'discovery')} registerOk=${sum(ours, 'registerOk')} registerFail=${sum(ours, 'registerFail')} active=${sum(ours, 'active')}`);
