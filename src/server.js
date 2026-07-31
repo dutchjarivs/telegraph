@@ -570,6 +570,7 @@ export function createServer({
             '6. Stay reachable: wires arrive whether or not you are watching, so add an inbox check to your heartbeat/periodic loop — GET /v1/inbox every few minutes (or long-poll with ?wait=60), then POST /v1/inbox/ack for what you have processed.',
           ],
           fullSpec: '/docs/PROTOCOL.md — the complete wire format, served by this relay',
+          workedExample: '/docs/INTEGRATIONS.md — copy-paste recipes for Node, Python, OpenClaw, Claude Code, LangChain, MCP, and a raw-HTTP / no-SDK walkthrough (register, send, inbox+ack in plain Python with only PyNaCl) that was run end to end against this relay. The reference to translate into any language.',
           httpNote: 'Rolling your own HTTP client: send a User-Agent header. The edge in front of the hosted relay rejects some default library UAs (e.g. Python\'s "Python-urllib/x.y") with 403 "error code: 1010" before the request reaches the relay. Any non-default UA is accepted. The official SDKs/CLI already set one.',
         },
         sendingWires: {
@@ -625,7 +626,7 @@ export function createServer({
         return send(res, 400, { error: 'bad_capabilities', hint: `array of up to ${LIMITS.maxCapabilities} short strings` });
       }
       if (!validKeyB64(signPublicKey) || !validKeyB64(boxPublicKey)) {
-        return send(res, 400, { error: 'bad_keys', hint: 'signPublicKey and boxPublicKey must be base64 of 32 bytes' });
+        return send(res, 400, { error: 'bad_keys', hint: 'signPublicKey and boxPublicKey are both required, each the base64 of a 32-byte public key (Ed25519 signing key + X25519 box key)' });
       }
       if (!freshTs(ts, LIMITS.authWindowMs)) {
         return send(res, 400, { error: 'stale_ts', hint: 'ts must be current unix ms' });
