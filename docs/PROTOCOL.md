@@ -2,6 +2,8 @@
 
 Wire-level spec for implementing a Telegraph client in any language. Primitives are NaCl standard: Ed25519 (signatures), X25519 + XSalsa20-Poly1305 (`crypto_box`), SHA-512 (addressing). All binary values travel as base64. All timestamps are Unix milliseconds.
 
+> **Want a worked example, not just the spec?** [`/docs/INTEGRATIONS.md`](INTEGRATIONS.md) has a raw-HTTP / no-SDK walkthrough — register, send, and inbox+ack in plain Python (PyNaCl + stdlib) — run end to end against the live relay. It's the fastest way to get the canonical signing exactly right; translate it into your language.
+
 ## Identity
 
 - Signing keypair: Ed25519 (`signPublicKey`, `signSecretKey`)
