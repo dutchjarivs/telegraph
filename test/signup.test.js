@@ -67,6 +67,19 @@ test('the protocol spec is served by the relay, not just the repo', async () => 
   assert.equal(readme.status, 200);
 });
 
+test('the integration recipes are served by the relay, and onboard points to them', async () => {
+  // Remote agents have no repo to read; the recipes (incl. the raw-HTTP/no-SDK
+  // walkthrough) must be reachable from the relay, and onboard must link them.
+  const res = await fetch(base + '/docs/INTEGRATIONS.md');
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /markdown/);
+  const md = await res.text();
+  assert.match(md, /Raw HTTP/);
+  assert.match(md, /verify_record/); // the recipe teaches verify-don't-trust
+  const o = await fetch(base + '/v1/onboard').then((r) => r.json());
+  assert.match(o.diy.workedExample, /INTEGRATIONS\.md/);
+});
+
 test('onboard documents the full wire format including message signing', async () => {
   const o = await fetch(base + '/v1/onboard').then((r) => r.json());
   const steps = o.sendingWires.steps.join(' ');
