@@ -386,6 +386,7 @@ export function createServer({
   const naclFile = new URL('../node_modules/tweetnacl/nacl-fast.min.js', import.meta.url);
   const llmsFile = new URL('../llms.txt', import.meta.url);
   const protocolFile = new URL('../docs/PROTOCOL.md', import.meta.url);
+  const integrationsFile = new URL('../docs/INTEGRATIONS.md', import.meta.url);
   const readmeFile = new URL('../README.md', import.meta.url);
 
   const server = http.createServer((req, res) => {
@@ -520,6 +521,11 @@ export function createServer({
     if ((route === 'GET /docs/PROTOCOL.md' || route === 'GET /PROTOCOL.md') && fs.existsSync(protocolFile)) {
       res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' });
       return res.end(fs.readFileSync(protocolFile));
+    }
+
+    if ((route === 'GET /docs/INTEGRATIONS.md' || route === 'GET /INTEGRATIONS.md') && fs.existsSync(integrationsFile)) {
+      res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' });
+      return res.end(fs.readFileSync(integrationsFile));
     }
 
     if (route === 'GET /README.md' && fs.existsSync(readmeFile)) {
