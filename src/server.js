@@ -237,10 +237,11 @@ export function createServer({
   const reportMap = new Map();
   const lookupMap = new Map();
   const webhookMap = new Map();
-  // Set once the relay sees a request it cannot attribute to a distinct client
-  // (see clientsAreIndistinguishable). Surfaced to the operator so a silently
-  // ineffective rate limit doesn't look like a working one.
-  let indistinctClients = false;
+  // How well the relay can tell one client from another, counted rather than
+  // latched (see attributionIsBroken for why a latch reported nothing useful).
+  // Surfaced to the operator so a silently ineffective rate limit doesn't look
+  // like a working one — and so a working one doesn't look ineffective.
+  const indistinct = { total: 0, distinct: 0, loopback: 0, untrusted_proxy_header: 0 };
 
   // Long-poll waiters: address -> Set of held inbox requests, each with a
   // wake() that is safe to call more than once. Purely in-memory and
@@ -1639,12 +1640,27 @@ export function createServer({
         // rather than let a skipped rate limit look like an enforced one.
         health: {
           trustProxy,
-          clientIpsIndistinguishable: indistinctClients,
-          ...(indistinctClients && trustProxy ? {
-            warning: 'requests are arriving with no usable CF-Connecting-IP or X-Forwarded-For, ' +
-              'so every client looks like the proxy. Per-IP directory read limits are being skipped ' +
-              '(throttling one shared bucket would rate-limit every agent at once). Fix the proxy ' +
-              'to forward the client IP.',
+          clientIpsIndistinguishable: attributionIsBroken(),
+          // The counts, not just the verdict: "12 loopback, 4000 distinct" and
+          // "12 loopback, 0 distinct" produce very different work, and the
+          // operator should not have to take the verdict's word for which they
+          // are looking at.
+          clientAttribution: {
+            distinct: indistinct.distinct,
+            loopback: indistinct.loopback,
+            untrustedProxyHeader: indistinct.untrusted_proxy_header,
+          },
+          ...(attributionIsBroken() ? {
+            warning: indistinct.untrusted_proxy_header > 0
+              ? 'requests are arriving with a forwarding header while TELEGRAPH_TRUST_PROXY is off, ' +
+                'so every client resolves to the proxy and no request has resolved to a distinct ' +
+                'address. Per-IP directory read limits are being skipped (throttling one shared ' +
+                'bucket would rate-limit every agent at once). Set TELEGRAPH_TRUST_PROXY=1 — but ' +
+                'only if the relay is reachable solely through that proxy.'
+              : 'every directory read so far has come from a loopback address and none from a ' +
+                'distinct client. If the relay is public and behind a proxy, the proxy is not ' +
+                'forwarding the client IP and per-IP read limits are being skipped. If it has ' +
+                'simply had no outside traffic yet, this clears itself on the first real client.',
           } : {}),
         },
         pricing: { currency: PRICING.currency, processor: PRICING.processor, usdPerMillionTokens: PRICING.usdPerMillionTokens },
@@ -1940,10 +1956,37 @@ export function createServer({
   //      single bucket that the entire userbase shares. The first scraper would
   //      then 429 every legitimate agent on the relay. The header is the only
   //      tell available, so it's the one we use.
+  //
+  // Returns the *reason* rather than a bare true, because the two cases call for
+  // different operator action and — see attributionIsBroken — one of them is not
+  // evidence of a fault at all.
   function clientsAreIndistinguishable(req, ip) {
-    if (ip === 'unknown' || ip === '::1' || ip === '::ffff:127.0.0.1' || ip.startsWith('127.')) return true;
-    if (!trustProxy && (req.headers['x-forwarded-for'] || req.headers['cf-connecting-ip'])) return true;
-    return false;
+    if (ip === 'unknown' || ip === '::1' || ip === '::ffff:127.0.0.1' || ip.startsWith('127.')) return 'loopback';
+    if (!trustProxy && (req.headers['x-forwarded-for'] || req.headers['cf-connecting-ip'])) return 'untrusted_proxy_header';
+    return null;
+  }
+
+  // Whether the relay actually cannot attribute traffic to distinct clients.
+  //
+  // Not the same question as "has any single request been unattributable", which
+  // is what this used to report. A loopback request is unattributable by
+  // definition and proves nothing: every relay is poked from its own host —
+  // smoke tests, `curl 127.0.0.1`, the watchdog. Reporting on that first-request
+  // basis meant the flag latched within seconds of boot on any deployment its
+  // operator ever touched locally, never cleared (nothing set it back), and so
+  // carried no information — a banner, not a signal. Worse, the text it rendered
+  // named a broken proxy, sending the operator to fix something that was fine.
+  //
+  // The discriminating fact is whether the relay has *ever* resolved a request to
+  // a distinct, non-loopback address. If it has, the proxy is forwarding and
+  // per-IP limits are being enforced on real traffic; local pokes are just local
+  // pokes. If it never has — across a run that saw unattributable traffic — then
+  // either every client really is collapsing to one key or nothing but loopback
+  // has arrived. Both are worth the operator's attention, and both clear the
+  // moment one genuine client shows up, which is the down edge the old flag
+  // lacked.
+  function attributionIsBroken() {
+    return indistinct.total > 0 && indistinct.distinct === 0;
   }
 
   // Retry-After tells an honest client exactly when to come back, so a caller in
@@ -1959,31 +2002,38 @@ export function createServer({
     });
   }
 
-  let warnedIndistinct = false;
+  // Warn once per *reason*, not once per process: a relay that has been logging
+  // "loopback" since boot should still say something the first time a real proxy
+  // misconfiguration shows up. Both lines are cheap and neither repeats.
+  const warnedIndistinct = new Set();
   function allowLookup(req) {
     const ip = clientIp(req);
-    if (clientsAreIndistinguishable(req, ip)) {
-      indistinctClients = true;
-      if (!warnedIndistinct) {
-        warnedIndistinct = true;
-        const untrustedProxy = !trustProxy &&
-          (req.headers['x-forwarded-for'] || req.headers['cf-connecting-ip']);
-        log(JSON.stringify({
-          warn: 'client_ip_indistinguishable',
-          detail: untrustedProxy
-            ? 'requests carry a forwarding header but TELEGRAPH_TRUST_PROXY is off, so every client ' +
-              'resolves to the proxy. Per-IP read limits are being SKIPPED rather than applied to one ' +
-              'shared bucket (which would throttle every agent at once). Set TELEGRAPH_TRUST_PROXY=1 — ' +
-              'but only if the relay is reachable *solely* through that proxy, or clients could spoof ' +
-              'the header and choose their own limit. See docs/DEPLOY.md.'
-            : 'requests resolve to a loopback address, so every client looks identical. If the relay is ' +
-              'behind a proxy, it is not forwarding the client IP. Per-IP read limits are being SKIPPED ' +
-              'rather than applied to one shared bucket. See docs/DEPLOY.md.',
-        }));
-      }
-      return true;
+    const reason = clientsAreIndistinguishable(req, ip);
+    if (!reason) {
+      indistinct.distinct += 1;
+      return allowHit(lookupMap, rateKeyForIp(ip), LIMITS.lookupRate);
     }
-    return allowHit(lookupMap, rateKeyForIp(ip), LIMITS.lookupRate);
+    indistinct.total += 1;
+    indistinct[reason] += 1;
+    if (!warnedIndistinct.has(reason)) {
+      warnedIndistinct.add(reason);
+      log(JSON.stringify({
+        warn: 'client_ip_indistinguishable',
+        reason,
+        detail: reason === 'untrusted_proxy_header'
+          ? 'a request carried a forwarding header but TELEGRAPH_TRUST_PROXY is off, so that client ' +
+            'resolved to the proxy. Per-IP read limits are SKIPPED for such requests rather than ' +
+            'applied to one shared bucket (which would throttle every agent at once). Set ' +
+            'TELEGRAPH_TRUST_PROXY=1 — but only if the relay is reachable *solely* through that ' +
+            'proxy, or clients could spoof the header and choose their own limit. See docs/DEPLOY.md.'
+          : 'a request resolved to a loopback address and was not rate-limited. Expected for local ' +
+            'traffic (smoke tests, health checks, a same-host proxy you own). It only indicates a ' +
+            'fault if the relay never also sees distinct client addresses — check ' +
+            'health.clientAttribution in GET /v1/admin/overview, which reports exactly that. ' +
+            'See docs/DEPLOY.md.',
+      }));
+    }
+    return true;
   }
 
   function readRaw(req) {

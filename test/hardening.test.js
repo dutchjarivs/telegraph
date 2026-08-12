@@ -200,7 +200,7 @@ test('when the proxy hides the client IP, the read limit is skipped, not shared'
       headers: { 'x-telegraph-admin': 'admin-tok' },
     })).json();
     assert.equal(overview.health.clientIpsIndistinguishable, true);
-    assert.match(overview.health.warning, /forward the client IP/);
+    assert.match(overview.health.warning, /not forwarding the client IP/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(dataDir, { recursive: true, force: true });
@@ -266,6 +266,70 @@ test('a proxy on another host with trust off does not become one shared bucket',
     })).json();
     assert.equal(overview.health.clientIpsIndistinguishable, true);
     assert.equal(overview.health.trustProxy, false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+// The degradation signal has to be able to turn back off.
+//
+// Found in production: the relay reported clientIpsIndistinguishable: true with
+// "fix the proxy to forward the client IP" while the proxy was forwarding
+// perfectly and public reads were being limited normally. The flag latched on
+// the first request that happened to be unattributable — a loopback smoke test
+// against the relay's own port, seconds after boot — and nothing ever cleared
+// it. A bit that is always 1 and a bit that is correctly 1 look identical on a
+// dashboard, so the operator learns nothing from either.
+//
+// Local traffic is not evidence of a broken proxy. The discriminating fact is
+// whether any request ever resolves to a distinct client.
+test('local pokes do not make the relay report broken client attribution', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegraph-attribution-'));
+  const server = createServer({
+    dataDir,
+    trustProxy: true, // behind a proxy that does forward the client address
+    adminToken: 'admin-tok',
+    limits: { lookupRate: { windowMs: 60_000, max: 3 } },
+    log: () => {},
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const overview = async () => (await fetch(`${base}/v1/admin/overview`, {
+    headers: { 'x-telegraph-admin': 'admin-tok' },
+  })).json();
+  try {
+    // The smoke test that used to poison the flag for the process lifetime.
+    assert.equal((await fetch(`${base}/v1/directory`)).status, 200);
+    assert.equal((await overview()).health.clientIpsIndistinguishable, true,
+      'with nothing but loopback seen, saying so is correct');
+
+    // Now a real client arrives through the proxy. One is enough to prove the
+    // relay can tell clients apart.
+    assert.equal((await fetch(`${base}/v1/directory`, {
+      headers: { 'cf-connecting-ip': '203.0.113.7' },
+    })).status, 200);
+
+    const after = await overview();
+    assert.equal(after.health.clientIpsIndistinguishable, false,
+      'a loopback poke must not outweigh a genuine client');
+    assert.equal(after.health.warning, undefined, 'no warning when nothing is wrong');
+    assert.equal(after.health.clientAttribution.loopback, 1);
+    assert.equal(after.health.clientAttribution.distinct, 1);
+
+    // And the limit the old flag claimed was being skipped is in fact enforced:
+    // cap is 3, and this client has spent 1 of them.
+    for (const expected of [200, 200, 429]) {
+      const res = await fetch(`${base}/v1/directory`, {
+        headers: { 'cf-connecting-ip': '203.0.113.7' },
+      });
+      assert.equal(res.status, expected);
+    }
+
+    // A different client is unaffected — the bucket is per-network, not shared.
+    assert.equal((await fetch(`${base}/v1/directory`, {
+      headers: { 'cf-connecting-ip': '198.51.100.9' },
+    })).status, 200);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(dataDir, { recursive: true, force: true });

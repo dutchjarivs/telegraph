@@ -153,8 +153,9 @@ Every per-IP limit depends on this, so check it rather than assume it. After the
 relay has served some real traffic:
 
 ```bash
-telegraph admin-overview | grep -A3 '"health"'
+telegraph admin-overview | grep -A6 '"health"'
 #   "clientIpsIndistinguishable": false   ← what you want
+#   "clientAttribution": { "distinct": 4102, "loopback": 12, "untrustedProxyHeader": 0 }
 ```
 
 If the relay can't tell clients apart — no forwarding header arrives, or one
@@ -165,10 +166,25 @@ whole userbase fills together is not a cap on the abuser: the first scraper woul
 429 every legitimate agent on the relay. It logs a warning and reports
 `clientIpsIndistinguishable: true` in `/v1/admin/overview`.
 
+**Read the counts, not just the verdict.** `loopback` is expected and harmless on
+its own: every relay gets poked from its own host by smoke tests, health checks,
+and a same-host proxy. Those requests are unattributable by definition, and each
+one is skipped rather than limited. What makes it a *fault* is `distinct: 0` —
+the relay has never once resolved a request to a real client address, so either
+the proxy is swallowing it or no outside traffic has arrived yet. One genuine
+client clears the warning. (Earlier builds latched the flag on the first
+unattributable request of any kind, which meant a single local `curl` at boot
+pinned it to `true` for the process lifetime and it never reported anything
+again. If you are reading an older relay's dashboard, that is what you are
+seeing.)
+
 That is a deliberate fail-open, and it is narrow: it applies only to the
-anonymous directory-read limit. Registration throttling and per-sender wire
-limits are unaffected. Fix the proxy config and the read limit starts working —
-but a relay in this state is not being scraped-protected, so don't leave it there.
+anonymous directory-read limit, and only to requests that are actually
+unattributable — a distinct client is still limited normally in the same process.
+Registration throttling and per-sender wire limits are unaffected. Fix the proxy
+config and the read limit starts working — but a relay whose `distinct` count
+stays at zero under real traffic is not being scrape-protected, so don't leave it
+there.
 
 ## 6. Stripe (card payments)
 
