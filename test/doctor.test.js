@@ -99,6 +99,60 @@ test('doctor against a dead relay: relay check fails, exit 1', async () => {
   assert.equal(check(r, 'relay').ok, false);
 });
 
+// A failing check's *message* is the part a newcomer acts on, and it had no test
+// — only `ok === false` did. These two branches used to share one string, so a
+// relay that was merely down told first-runners they had the wrong URL.
+test('doctor separates "relay is down" from "that URL is not a relay"', async () => {
+  const http = await import('node:http');
+  let mode = 'down';
+  const fake = http.createServer((req, res) => {
+    if (mode === 'down') { res.writeHead(530, { 'content-type': 'text/html' }); res.end('<html>error 1033</html>'); return; }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, service: 'something-else' }));
+  });
+  await new Promise((resolve) => fake.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${fake.address().port}`;
+  try {
+    // Cloudflare 530/1033 in front of a dead origin: this is exactly what the
+    // public relay returned during the 2026-07-27 outage.
+    const down = check(await doctor({ TELEGRAPH_SERVER: url }), 'relay');
+    assert.equal(down.ok, false);
+    assert.match(down.detail, /HTTP 530/);
+    assert.match(down.detail, /not serving a healthy relay/);
+    assert.match(down.detail, /retry before you change TELEGRAPH_SERVER/);
+    // The one thing it must not do: send the operator off to fix their config.
+    assert.doesNotMatch(down.detail, /not a telegraph relay/);
+
+    mode = 'wrong';
+    const wrong = check(await doctor({ TELEGRAPH_SERVER: url }), 'relay');
+    assert.equal(wrong.ok, false);
+    assert.match(wrong.detail, /not a telegraph relay/);
+    assert.match(wrong.detail, /check TELEGRAPH_SERVER/);
+  } finally {
+    await new Promise((resolve) => fake.close(resolve));
+  }
+});
+
+// Skew is a difference between two clocks, so the advice must not assert which
+// one is wrong — signatures are validated against the relay's clock, and "fix
+// your clock" is the wrong move when the relay is the one that drifted.
+test('doctor does not blame the local clock for skew it cannot attribute', async () => {
+  const http = await import('node:http');
+  const fake = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, service: 'telegraph', release: 'fake', uptimeSeconds: 1, agents: 0, now: Date.now() + 20 * 60_000 }));
+  });
+  await new Promise((resolve) => fake.listen(0, '127.0.0.1', resolve));
+  try {
+    const clock = check(await doctor({ TELEGRAPH_SERVER: `http://127.0.0.1:${fake.address().port}` }), 'clock');
+    assert.equal(clock.ok, false);
+    assert.match(clock.detail, /difference between two clocks/);
+    assert.match(clock.detail, /the relay's clock is the broken one/);
+  } finally {
+    await new Promise((resolve) => fake.close(resolve));
+  }
+});
+
 test('doctor tolerates clock skew under the ±5 min signing window', async () => {
   // A fake relay whose /v1/health reports a clock 90s ahead of local time.
   // Signed requests (authWindowMs = 5 min) would still succeed at that skew,

@@ -416,8 +416,14 @@ async function main() {
         if (r.ok && body.service === 'telegraph') {
           health = body;
           add('relay', true, `${server} — release ${body.release}, up ${body.uptimeSeconds}s, ${body.agents} agents`);
+        } else if (!r.ok) {
+          // Two very different causes used to share one string. An HTTP error is
+          // a relay that is down, restarting, or behind an edge returning its own
+          // error page (Cloudflare 5xx) — nothing the newcomer fixes by editing
+          // TELEGRAPH_SERVER, which is what "not a telegraph relay" tells them to do.
+          add('relay', false, `${server} is not serving a healthy relay right now: HTTP ${r.status}. That is the relay or its proxy failing, not a wrong URL — retry before you change TELEGRAPH_SERVER.`);
         } else {
-          add('relay', false, `${server} answered but not like a telegraph relay (HTTP ${r.status})`);
+          add('relay', false, `${server} answered HTTP 200 but is not a telegraph relay (no "service":"telegraph" in the body) — check TELEGRAPH_SERVER.`);
         }
       } catch (err) {
         add('relay', false, `${server} unreachable: ${err.message}`);
@@ -432,8 +438,11 @@ async function main() {
         add('clock', skewMs < failsAt, skewMs < 60_000
           ? `local/relay skew ${skewMs}ms`
           : skewMs < failsAt
-            ? `local/relay skew ${skewMs}ms — still under the ±5 min signing window, but fix this machine's clock before it drifts further`
-            : `local/relay skew ${skewMs}ms — signed requests (inbox, send) fail past ±5 min; fix this machine's clock`);
+            ? `local/relay skew ${skewMs}ms — still under the ±5 min signing window, but one of the two clocks is drifting; check this machine's first`
+            // This measures a difference, so it does not know which clock is wrong.
+            // Signatures are checked against the relay's clock, so "fix your clock"
+            // is actively wrong advice when the relay is the one that drifted.
+            : `local/relay skew ${skewMs}ms — signed requests (inbox, send) fail past ±5 min. This is the difference between two clocks: check this machine's first, but if it is correct the relay's clock is the broken one and only its operator can fix it.`);
       }
       const file = identityPath();
       let identity = null;
