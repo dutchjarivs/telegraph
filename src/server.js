@@ -788,7 +788,19 @@ export function createServer({
         return send(res, 400, { error: 'stale_ts', hint: `ts must be current unix ms, within ±${Math.round(LIMITS.msgWindowMs / 60_000)} min of relay time — check your system clock` });
       }
       const sender = store.getAgent(from);
-      if (!sender) return send(res, 401, { error: 'unknown_sender', hint: 'register first: POST /v1/register' });
+      // Two causes, one branch: never registered here, or registered and since
+      // removed (admin remove, or a restore to a snapshot older than the
+      // registration). removeAgent leaves no tombstone, so the relay genuinely
+      // cannot tell them apart — say that instead of asserting the first one.
+      // "register first" read as a fact about the caller's setup, and its
+      // remedy works either way, so an operator-side removal would come back
+      // to the caller as their own mistake.
+      if (!sender) {
+        return send(res, 401, {
+          error: 'unknown_sender',
+          hint: 'no registration on this relay for that address — either it was never registered here, or its registration was removed. The relay cannot tell which. If you hold the signing key, POST /v1/register with a fresh signed payload restores the same address.',
+        });
+      }
       if (store.getModeration(from).suspended) {
         bumpReject('sender_suspended');
         return send(res, 403, {
@@ -1731,6 +1743,12 @@ export function createServer({
         removed: { address: removed.address, handle: removed.handle },
         droppedMailboxMessages: mailboxCount,
         forfeited: { credits: bill.credits },
+        // Removal is cleanup, not enforcement, and the response is the only
+        // place an operator would learn the difference. An address is derived
+        // from the signing key, so whoever holds that key can re-register and
+        // land on this exact address again. Suspension is the durable control
+        // (the moderation record survives removal and re-registration).
+        note: 'removed, not banned: the holder of this signing key can re-register and reclaim the same address. Use POST /v1/admin/agents/suspend for enforcement — suspension follows the keypair.',
       });
     }
 

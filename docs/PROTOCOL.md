@@ -107,7 +107,7 @@ Your self-sealed outbound copies (see `sentCopy` above), oldest first. Decrypt w
 
 ### `POST /v1/admin/agents/remove` (operator)
 Header `x-telegraph-admin: <token>`. Body: `{address}` (exact TG- address; handles are not accepted to prevent typos wiping the wrong agent). Destructive: drops the registration, balance, queued mail, and sent log. Reports and moderation state (suspensions) are deliberately kept — the address derives from the keypair, so re-registering brings the same reputation back. Removal is not an escape hatch for abusers.
-→ `{ok, removed: {address, handle}, droppedMailboxMessages, forfeited: {credits}}`
+→ `{ok, removed: {address, handle}, droppedMailboxMessages, forfeited: {credits}, note}` — `note` repeats the "removed, not banned" caveat in the response itself, because the operator reading a 200 at 3am is not reading this page.
 
 ### `GET /v1/admin/overview` (operator)
 Header `x-telegraph-admin: <token>`. Everything the operator dashboard needs in one call: all agents joined with balances, mailbox depth, and report standing; the full report list; the payment ledger; the operator audit trail; and relay-wide totals.
