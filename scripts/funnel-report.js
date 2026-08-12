@@ -14,6 +14,21 @@
 //     because only the IPv4 fleet IP was ever passed.
 //   Loopback is always treated as ours (watchdog + local health checks).
 //
+// Fleet identity is ALSO read from config, not just flags (2026-08-12). The flag
+// alone was not enough: running the report bare — `node scripts/funnel-report.js`,
+// which is how it actually gets run — silently counted 12 of this box's own rotating
+// IPv6 privacy addresses as distinct external agents (external IPs 16 vs 4, discovery
+// 52 vs 3, registerOk 3 vs 1). The 07-28 fix was already in the code and documented
+// in this very header; the failure was that honesty was opt-in per invocation. A
+// metric that only tells the truth when you remember a flag will flatter you exactly
+// when you most want to believe it, because the inflated number is the comfortable
+// one and nothing pushes back. So: config is loaded by default, and a run with NO
+// fleet identity configured prints a loud UNCONFIGURED banner and marks the external
+// numbers untrustworthy rather than printing a clean-looking lie.
+//   TELEGRAPH_FLEET_IP / TELEGRAPH_FLEET_IP_PREFIX  comma-separated, either may be set.
+//   scripts/funnel-fleet.local.json  {"ips": [...], "prefixes": [...]} — gitignored,
+//     because a home IPv6 /64 is Tristan's address, not a project constant.
+//
 // Funnel stages counted per IP:
 //   discovery  GET  /, /onboard, /v1/onboard, /docs/*, /README*, /directory, /v1/directory
 //   register   POST /v1/register  (split by status: 2xx ok vs 4xx/5xx failed)
@@ -48,6 +63,28 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === '--fleet-ip-prefix') fleetIpPrefixes.push(args[++i]);
   else files.push(args[i]);
 }
+
+// Fleet identity from config, so the default invocation is the honest one.
+// Flags still win by being additive — nothing here overrides an explicit --fleet-ip.
+const splitList = (s) => (s ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+for (const ip of splitList(process.env.TELEGRAPH_FLEET_IP)) fleetIps.add(ip);
+for (const p of splitList(process.env.TELEGRAPH_FLEET_IP_PREFIX)) fleetIpPrefixes.push(p);
+const fleetConfigPath = path.join(import.meta.dirname, 'funnel-fleet.local.json');
+if (fs.existsSync(fleetConfigPath)) {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(fleetConfigPath, 'utf8'));
+    for (const ip of cfg.ips ?? []) fleetIps.add(ip);
+    for (const p of cfg.prefixes ?? []) fleetIpPrefixes.push(p);
+  } catch (err) {
+    // Loud, not silent: a broken config is indistinguishable from "no fleet" downstream,
+    // and "no fleet" is exactly the state that inflates the external numbers.
+    console.error(`funnel-report: could not read ${fleetConfigPath}: ${err.message}`);
+    process.exit(1);
+  }
+}
+// Loopback alone is not fleet identity — the relay's own outbound egress never
+// looks like loopback, so a run with nothing configured cannot separate us from them.
+const fleetConfigured = fleetIps.size > 0 || fleetIpPrefixes.length > 0;
 if (files.length === 0) {
   const root = path.join(import.meta.dirname, '..');
   for (const f of ['relay-access-archive.log', 'relay-live.log']) {
@@ -132,6 +169,15 @@ const printTotals = (label, rows) => console.log(`  ${label}: discovery=${sum(ro
 
 console.log(`parsed ${parsed} log lines from ${files.length} file(s) (${skipped} non-access lines skipped; ${uaTagged} carry a UA class)`);
 console.log(`fleet/local IPs: ${ours.length} — external-agent IPs: ${external.length} — unclassified IPs: ${unclassified.length}\n`);
+
+if (!fleetConfigured) {
+  console.log('!! FLEET UNCONFIGURED — the numbers below are NOT trustworthy.');
+  console.log('!! No --fleet-ip/--fleet-ip-prefix, no TELEGRAPH_FLEET_IP[_PREFIX], no funnel-fleet.local.json.');
+  console.log('!! Every request this box made to its own relay is being counted as an outside visitor,');
+  console.log('!! and IPv6 privacy extensions rotate our egress address, so we appear as MANY visitors.');
+  console.log('!! Measured 2026-08-12: unconfigured read 16 external IPs / 52 discovery / 3 registerOk;');
+  console.log('!! the truth was 4 / 3 / 1. Configure fleet identity, then re-read.\n');
+}
 
 console.log('EXTERNAL AGENTS (positive protocol signal: registered ok, or used the wire):');
 if (external.length === 0) {

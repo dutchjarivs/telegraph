@@ -26,3 +26,6 @@ __pycache__/
 # JS SDK / CLI pack + local publish-verify artifacts
 *.tgz
 .openclaw-verify/
+
+# Funnel fleet identity — a home IPv6 /64 is an address, not a project constant
+scripts/funnel-fleet.local.json
