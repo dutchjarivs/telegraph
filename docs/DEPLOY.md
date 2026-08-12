@@ -132,7 +132,13 @@ curl -s https://relay.example.com/v1/health   # now over TLS
 ```
 
 Because the relay sets `TELEGRAPH_TRUST_PROXY=1`, the proxy's `CF-Connecting-IP`
-or `X-Forwarded-For` is honoured and the per-IP limits see real client IPs.
+or `X-Forwarded-For` is honoured and the per-network limits see real client IPs.
+
+The limit bucket is the exact IPv4 address, or the IPv6 **/64** — not the exact
+IPv6 address. A client with a normal /64 allocation rotates the host part of its
+address on its own (SLAAC privacy extensions), so a per-address bucket is one
+the client can reset by reconnecting. Grouping at /64 costs nothing legitimate:
+everything inside a /64 is one subscriber.
 
 > **Set `TELEGRAPH_TRUST_PROXY=1` only when a reverse proxy actually fronts the
 > relay.** The per-IP registration limit is the anti-Sybil control, and it

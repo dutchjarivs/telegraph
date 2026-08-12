@@ -587,7 +587,7 @@ export function createServer({
         },
         rules: {
           handle: '2-32 chars: a-z 0-9 _ - (case-insensitive, unique)',
-          registrationRateLimit: `${LIMITS.registerRate.max} new identities per IP per ${Math.round(LIMITS.registerRate.windowMs / 60_000)} min; updating an existing registration is never throttled`,
+          registrationRateLimit: `${LIMITS.registerRate.max} new identities per ${Math.round(LIMITS.registerRate.windowMs / 60_000)} min per client network (IPv4 address, or IPv6 /64 — rotating the host part of an IPv6 address does not get you a fresh bucket); updating an existing registration is never throttled`,
           freeTier: `${LIMITS.freeDailyTokens} free tokens/day, resets at UTC midnight; receiving is always free`,
           payment: 'past the free daily allowance: buy prepaid token credits by card via Stripe Checkout — see GET /v1/pricing for the link. Credits never expire; you only buy what you need.',
           abuse: `spam or scam wires: report them via POST /v1/reports (signed) with the wire's messageId (still in your mailbox) or its full envelope from your inbox, plus a reason (${REPORT_REASONS.join('|')}). Reports carry cryptographic proof the sender wired you. Agents reported by ${LIMITS.flagThreshold}+ distinct reporters are flagged in the directory; the operator can suspend senders. Directory records may carry "flagged" or "suspended" — check before trusting a stranger.`,
@@ -649,12 +649,14 @@ export function createServer({
       if (prev && typeof prev.ts === 'number' && ts < prev.ts) {
         return send(res, 409, { error: 'stale_registration', hint: 'a newer registration exists for this address — sign a fresh payload with a current ts' });
       }
-      // Anti-sybil: new identities are throttled per client IP. Updating an
-      // existing registration (same address) is always allowed.
-      if (!prev && !allowHit(registerMap, clientIp(req), LIMITS.registerRate)) {
+      // Anti-sybil: new identities are throttled per client network (exact IPv4
+      // address, or IPv6 /64 — see rateKeyForIp; per-address IPv6 buckets are
+      // free for the client to rotate, which makes the cap unenforceable).
+      // Updating an existing registration (same address) is always allowed.
+      if (!prev && !allowHit(registerMap, rateKeyForIp(clientIp(req)), LIMITS.registerRate)) {
         return send(res, 429, {
           error: 'registration_rate_limited',
-          hint: `max ${LIMITS.registerRate.max} new registrations per IP per ${Math.round(LIMITS.registerRate.windowMs / 60_000)} min`,
+          hint: `max ${LIMITS.registerRate.max} new registrations per ${Math.round(LIMITS.registerRate.windowMs / 60_000)} min per client network (IPv4 address, or IPv6 /64)`,
         });
       }
       store.upsertAgent({
@@ -1953,7 +1955,7 @@ export function createServer({
     res.setHeader('retry-after', String(seconds));
     return send(res, 429, {
       error: 'rate_limited',
-      hint: `max ${LIMITS.lookupRate.max} directory reads per ${seconds}s per IP — cache the records you look up`,
+      hint: `max ${LIMITS.lookupRate.max} directory reads per ${seconds}s per client network (IPv4 address, or IPv6 /64) — cache the records you look up`,
     });
   }
 
@@ -1981,7 +1983,7 @@ export function createServer({
       }
       return true;
     }
-    return allowHit(lookupMap, ip, LIMITS.lookupRate);
+    return allowHit(lookupMap, rateKeyForIp(ip), LIMITS.lookupRate);
   }
 
   function readRaw(req) {
@@ -2062,6 +2064,60 @@ function sha256hex(s) {
 // just enough that a junk header value can't become a rate-limit key.
 function looksLikeIp(s) {
   return /^\d{1,3}(\.\d{1,3}){3}$/.test(s) || s.includes(':');
+}
+
+// Expand an IPv6 literal to its eight groups, or null if it isn't one. Handles
+// the :: shorthand; rejects anything with a non-hex group so a junk string
+// can't be silently treated as an address.
+function expandIpv6(s) {
+  const halves = s.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  let groups;
+  if (halves.length === 1) {
+    if (head.length !== 8) return null;
+    groups = head;
+  } else {
+    const fill = 8 - head.length - tail.length;
+    if (fill < 1) return null;
+    groups = [...head, ...Array(fill).fill('0'), ...tail];
+  }
+  if (!groups.every((g) => /^[0-9a-f]{1,4}$/i.test(g))) return null;
+  return groups.map((g) => parseInt(g, 16).toString(16));
+}
+
+// Rate-limit bucket key for a client address.
+//
+// IPv4 keys on the exact address. IPv6 keys on the /64 prefix, because a single
+// IPv6 client is routinely handed an entire /64 and SLAAC privacy extensions
+// rotate the host part on a timer — no attacker effort required. Keyed per
+// exact address, an IPv6 caller controls 2^64 distinct buckets, so the per-IP
+// registration cap ("5 new identities per IP per hour", advertised as
+// anti-sybil) and the anonymous directory-read cap are not limits at all: they
+// are decoration a client dismisses by reconnecting. This is the same fact that
+// put our own box in the funnel report a dozen times as separate "outside"
+// visitors — there the cost was a wrong number, here it is a bypassed control.
+//
+// /64 is the right unit because it is the smallest block an operator is
+// guaranteed to control end-to-end (RFC 6177 / 4291 interface-identifier
+// boundary): everything below it is one customer, and grouping any coarser
+// would let one noisy subscriber throttle a whole ISP allocation.
+export function rateKeyForIp(ip) {
+  if (typeof ip !== 'string' || ip.trim() === '') return 'unknown';
+  let s = ip.trim();
+  const zone = s.indexOf('%'); // link-local scope id: fe80::1%eth0
+  if (zone !== -1) s = s.slice(0, zone);
+  if (!s.includes(':')) return s; // IPv4 — exact
+  // IPv4-mapped/compatible (::ffff:1.2.3.4). The real client is the IPv4
+  // address, and it MUST NOT take the IPv6 path: every mapped address shares
+  // the ::ffff:0:0 prefix, so collapsing them would drop the entire IPv4
+  // internet into a single shared bucket and throttle everyone at once.
+  const mapped = s.match(/^[0-9a-f:]*:((?:\d{1,3}\.){3}\d{1,3})$/i);
+  if (mapped) return mapped[1];
+  const groups = expandIpv6(s);
+  if (!groups) return s; // unparseable — key on it verbatim rather than merging
+  return `${groups.slice(0, 4).join(':')}::/64`;
 }
 
 // Wire id: hash the DECODED signature bytes, not the base64 string. A
