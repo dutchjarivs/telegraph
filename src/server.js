@@ -294,6 +294,56 @@ export function createServer({
   // proxy that regresses is reported the same day. This is a dashboard, not a
   // pager.
   const ATTRIBUTION_WINDOW_MS = attributionWindowMs;
+  // "Indistinguishable" is a claim about a population, so it is answered with a
+  // proportion, not with the existence of one member. Two bands, because two
+  // different faults hide on either side of a majority:
+  //
+  //   > 50% unattributable — most traffic shares one key. The limit is not a
+  //     limit. This is the total-collapse case and needs no sample floor: one
+  //     loopback poke and nothing else is 100%, and saying so is true.
+  //
+  //   >= 10% unattributable, with enough requests to mean it — a *partial*
+  //     collapse: a second ingress that doesn't forward, one listener of two
+  //     misconfigured. Both signals are live in the same window forever, so any
+  //     existential test ("did we see a distinct client?") answers false — i.e.
+  //     healthy — while a tenth of the userbase shares a bucket. That verdict is
+  //     not stuck, it is correct by its own definition and still wrong.
+  //
+  // The floor applies only to the minority band: at small samples a tenth is one
+  // request, and one local poke among nine real reads is not a fault.
+  const ATTRIBUTION_MAJORITY = 0.5;
+  const ATTRIBUTION_PARTIAL_FRACTION = 0.1;
+  const ATTRIBUTION_PARTIAL_MIN_SAMPLE = 20;
+  // In-window counts need buckets, not a running total: a counter cannot forget
+  // and two timestamps cannot count. Twelve slices per window, summed over the
+  // slices that are still in range — bounded memory, and the resolution error is
+  // one slice.
+  const ATTRIBUTION_SLICES = 12;
+  const attributionSliceMs = Math.max(1, Math.floor(ATTRIBUTION_WINDOW_MS / ATTRIBUTION_SLICES));
+  const attributionSlices = new Array(ATTRIBUTION_SLICES).fill(null)
+    .map(() => ({ at: -1, unattributable: 0, distinct: 0 }));
+  function attributionSlice(now) {
+    const startedAt = Math.floor(now / attributionSliceMs) * attributionSliceMs;
+    const slot = attributionSlices[Math.floor(now / attributionSliceMs) % ATTRIBUTION_SLICES];
+    if (slot.at !== startedAt) { slot.at = startedAt; slot.unattributable = 0; slot.distinct = 0; }
+    return slot;
+  }
+  function attributionWindow(now) {
+    let unattributable = 0;
+    let distinct = 0;
+    for (const slot of attributionSlices) {
+      if (slot.at < 0 || now - slot.at >= ATTRIBUTION_WINDOW_MS + attributionSliceMs) continue;
+      unattributable += slot.unattributable;
+      distinct += slot.distinct;
+    }
+    const observed = unattributable + distinct;
+    return {
+      unattributable,
+      distinct,
+      observed,
+      fraction: observed === 0 ? null : unattributable / observed,
+    };
+  }
 
   // Long-poll waiters: address -> Set of held inbox requests, each with a
   // wake() that is safe to call more than once. Purely in-memory and
@@ -1745,9 +1795,10 @@ export function createServer({
         },
         // A per-IP limit that can't tell clients apart is not a limit. Report it
         // rather than let a skipped rate limit look like an enforced one.
-        health: {
+        health: ((attribution) => ({
           trustProxy,
-          clientIpsIndistinguishable: attributionIsBroken(),
+          clientIpsIndistinguishable: attribution.state === 'indistinguishable'
+            || attribution.state === 'partial',
           // The counts, not just the verdict: "12 loopback, 4000 distinct" and
           // "12 loopback, 0 distinct" produce very different work, and the
           // operator should not have to take the verdict's word for which they
@@ -1765,8 +1816,34 @@ export function createServer({
               ? Date.now() - indistinct.lastDistinctAt : null,
             lastUnattributableAgoMs: indistinct.lastUnattributableAt
               ? Date.now() - indistinct.lastUnattributableAt : null,
+            // The verdict is a proportion over the window, so publish the
+            // proportion. A relay sitting at 0.3 is not "healthy" in the way a
+            // relay at 0.0 is healthy, and only one of those two facts survives
+            // being rendered as a boolean.
+            state: attribution.state,
+            inWindow: {
+              observed: attribution.observed,
+              unattributable: attribution.unattributable,
+              distinct: attribution.distinct,
+              unattributableFraction: attribution.fraction === null
+                ? null : Math.round(attribution.fraction * 1000) / 1000,
+            },
+            thresholds: {
+              indistinguishableAbove: ATTRIBUTION_MAJORITY,
+              partialAtOrAbove: ATTRIBUTION_PARTIAL_FRACTION,
+              partialMinObserved: ATTRIBUTION_PARTIAL_MIN_SAMPLE,
+            },
           },
-          ...(attributionIsBroken() ? {
+          ...(attribution.state === 'partial' ? {
+            warning: 'part of the traffic in this window could not be attributed to a distinct ' +
+              `client (${attribution.unattributable} of ${attribution.observed} requests) while the ` +
+              'rest could. That pattern is a *partial* attribution failure — a second ingress, or ' +
+              'one listener of several, not forwarding the client address — and per-IP read limits ' +
+              'are being skipped for that share of clients. A relay with no proxy in front of it ' +
+              'and some local traffic reads the same way; check where those requests come from ' +
+              'before changing anything.',
+          } : {}),
+          ...(attribution.state === 'indistinguishable' ? {
             warning: indistinct.untrusted_proxy_header > 0
               ? 'requests are arriving with a forwarding header while TELEGRAPH_TRUST_PROXY is off, ' +
                 'so every client resolves to the proxy and nothing has resolved to a distinct ' +
@@ -1778,7 +1855,7 @@ export function createServer({
                 'client IP and per-IP read limits are being skipped. If it has simply had no ' +
                 'outside traffic lately, this clears itself on the first real client.',
           } : {}),
-        },
+        }))(attributionState()),
         pricing: { currency: PRICING.currency, processor: PRICING.processor, usdPerMillionTokens: PRICING.usdPerMillionTokens },
         totals: {
           agents: agents.length,
@@ -2129,12 +2206,30 @@ export function createServer({
   // With no traffic at all in the window the answer is false, not true: the
   // flag makes a claim about observed requests, and there have been none. It
   // re-fires on the first unattributable request after the silence.
+  //
+  // And the question inside the window is *what fraction*, not *whether any*.
+  // The first windowed version asked `sawUnattributable && !sawDistinct`, which
+  // is the same existential mistake with a decay on it: one distinct request
+  // anywhere in the window — a health check from a real address, arriving every
+  // few minutes forever — suppresses the alarm no matter what else landed. That
+  // is the realistic failure, too. Total proxy death announces itself; a second
+  // ingress that doesn't forward leaves both signals live in the same window,
+  // permanently, and an existential test calls that healthy.
+  //
+  // A population claim cannot be refuted by one member. See ATTRIBUTION_MAJORITY
+  // for the two bands and why only the minority one takes a sample floor.
+  function attributionState(now = Date.now()) {
+    const win = attributionWindow(now);
+    if (win.observed === 0) return { state: 'no_traffic', ...win };
+    if (win.fraction > ATTRIBUTION_MAJORITY) return { state: 'indistinguishable', ...win };
+    if (win.fraction >= ATTRIBUTION_PARTIAL_FRACTION
+      && win.observed >= ATTRIBUTION_PARTIAL_MIN_SAMPLE) return { state: 'partial', ...win };
+    return { state: 'ok', ...win };
+  }
+
   function attributionIsBroken(now = Date.now()) {
-    const sawUnattributable = indistinct.lastUnattributableAt > 0
-      && now - indistinct.lastUnattributableAt <= ATTRIBUTION_WINDOW_MS;
-    const sawDistinct = indistinct.lastDistinctAt > 0
-      && now - indistinct.lastDistinctAt <= ATTRIBUTION_WINDOW_MS;
-    return sawUnattributable && !sawDistinct;
+    const { state } = attributionState(now);
+    return state === 'indistinguishable' || state === 'partial';
   }
 
   // Retry-After tells an honest client exactly when to come back, so a caller in
@@ -2164,11 +2259,13 @@ export function createServer({
     if (!reason) {
       indistinct.distinct += 1;
       indistinct.lastDistinctAt = now;
+      attributionSlice(now).distinct += 1;
       return allowHit(lookupMap, rateKeyForIp(ip), LIMITS.lookupRate);
     }
     indistinct.total += 1;
     indistinct[reason] += 1;
     indistinct.lastUnattributableAt = now;
+    attributionSlice(now).unattributable += 1;
     const warnedAt = warnedIndistinct.get(reason) || 0;
     if (now - warnedAt > ATTRIBUTION_WINDOW_MS) {
       warnedIndistinct.set(reason, now);

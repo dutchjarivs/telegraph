@@ -436,3 +436,118 @@ test('attribution verdict makes no claim about a window with no traffic', async 
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+// The third instance of the same bug, in the fix for the second.
+//
+// Raised publicly, again from the commit message alone: replacing "has a
+// distinct client ever been seen" with "has one been seen lately" swaps a latch
+// for a decay and keeps the quantifier. `sawUnattributable && !sawDistinct` is
+// still existential, so ONE distinct request anywhere in the window — a health
+// check from a real address, every few minutes, forever — reports the relay
+// healthy while any amount of traffic beside it collapses to a single bucket.
+//
+// And that is the likely failure, not the exotic one. Total proxy death is loud.
+// A second ingress that doesn't forward, or one listener of two misconfigured,
+// leaves both signals live in the same window permanently: the verdict is not
+// stuck, it is correct by its own definition and still wrong.
+//
+// Neither of the two tests above can construct that state — each moves through
+// windows in which exactly one signal is live, which is why they passed. This
+// one puts both in the same window, which is the input the check has to be able
+// to dissent on.
+test('a partial attribution failure is reported while genuine clients keep arriving', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegraph-attribution-partial-'));
+  const server = createServer({
+    dataDir,
+    trustProxy: true,
+    adminToken: 'admin-tok',
+    attributionWindowMs: 60_000, // one window for the whole test; no waiting
+    limits: { lookupRate: { windowMs: 60_000, max: 1000 } },
+    log: () => {},
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const health = async () => (await (await fetch(`${base}/v1/admin/overview`, {
+    headers: { 'x-telegraph-admin': 'admin-tok' },
+  })).json()).health;
+  const distinct = async (n) => {
+    for (let i = 0; i < n; i += 1) {
+      assert.equal((await fetch(`${base}/v1/directory`, {
+        headers: { 'cf-connecting-ip': `203.0.113.${(i % 250) + 1}` },
+      })).status, 200);
+    }
+  };
+  const unattributable = async (n) => {
+    for (let i = 0; i < n; i += 1) {
+      assert.equal((await fetch(`${base}/v1/directory`)).status, 200);
+    }
+  };
+  try {
+    // A healthy relay with the ordinary trickle of local traffic: smoke tests,
+    // the watchdog, a curl from the host. Below the minority band, and it must
+    // stay quiet or the operator learns to ignore it.
+    await distinct(38);
+    await unattributable(2);
+    const healthy = await health();
+    assert.equal(healthy.clientAttribution.state, 'ok');
+    assert.equal(healthy.clientIpsIndistinguishable, false,
+      'a 5% trickle of local traffic is not an attribution failure');
+    assert.equal(healthy.warning, undefined);
+    assert.equal(healthy.clientAttribution.inWindow.unattributableFraction, 0.05);
+
+    // Now one ingress of two stops forwarding. Genuine clients keep arriving on
+    // the other one for the whole window — which is exactly what silenced the
+    // existential check.
+    await unattributable(10);
+    const partial = await health();
+    assert.equal(partial.clientAttribution.inWindow.observed, 50);
+    assert.equal(partial.clientAttribution.inWindow.unattributable, 12);
+    assert.equal(partial.clientAttribution.inWindow.distinct, 38);
+    assert.ok(partial.clientAttribution.lastDistinctAgoMs < 60_000,
+      'distinct clients are still arriving in this window — the case the old check called healthy');
+    assert.equal(partial.clientAttribution.state, 'partial');
+    assert.equal(partial.clientIpsIndistinguishable, true,
+      'a quarter of the traffic sharing one bucket is a fault, not a rounding error');
+    assert.match(partial.warning, /partial/);
+
+    // The minority band is a claim about a population, so it needs a population.
+    // One local poke among nine real reads is the boot-smoke-test false red that
+    // started all of this, and it must not come back.
+    const small = fs.mkdtempSync(path.join(os.tmpdir(), 'telegraph-attribution-small-'));
+    const tiny = createServer({
+      dataDir: small, trustProxy: true, adminToken: 'admin-tok',
+      limits: { lookupRate: { windowMs: 60_000, max: 1000 } }, log: () => {},
+    });
+    await new Promise((resolve) => tiny.listen(0, '127.0.0.1', resolve));
+    const tinyBase = `http://127.0.0.1:${tiny.address().port}`;
+    try {
+      for (let i = 0; i < 9; i += 1) {
+        await fetch(`${tinyBase}/v1/directory`, { headers: { 'cf-connecting-ip': `198.51.100.${i + 1}` } });
+      }
+      await fetch(`${tinyBase}/v1/directory`);
+      const quiet = (await (await fetch(`${tinyBase}/v1/admin/overview`, {
+        headers: { 'x-telegraph-admin': 'admin-tok' },
+      })).json()).health;
+      assert.equal(quiet.clientAttribution.inWindow.unattributableFraction, 0.1);
+      assert.equal(quiet.clientAttribution.state, 'ok',
+        'at ten requests, a tenth is one request');
+      assert.equal(quiet.clientIpsIndistinguishable, false);
+    } finally {
+      await new Promise((resolve) => tiny.close(resolve));
+      fs.rmSync(small, { recursive: true, force: true });
+    }
+
+    // Total collapse still reads as total collapse, not as a partial one: the
+    // majority band takes no floor, because "one loopback poke and nothing else"
+    // is 100% and saying so is true.
+    await distinct(0);
+    await unattributable(80);
+    const collapsed = await health();
+    assert.equal(collapsed.clientAttribution.state, 'indistinguishable');
+    assert.equal(collapsed.clientIpsIndistinguishable, true);
+    assert.match(collapsed.warning, /loopback/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});

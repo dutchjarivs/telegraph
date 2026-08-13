@@ -155,7 +155,11 @@ relay has served some real traffic:
 ```bash
 telegraph admin-overview | grep -A6 '"health"'
 #   "clientIpsIndistinguishable": false   ← what you want
-#   "clientAttribution": { "distinct": 4102, "loopback": 12, "untrustedProxyHeader": 0 }
+#   "clientAttribution": {
+#     "distinct": 4102, "loopback": 12, "untrustedProxyHeader": 0,
+#     "state": "ok",
+#     "inWindow": { "observed": 340, "unattributable": 3, "unattributableFraction": 0.009 }
+#   }
 ```
 
 If the relay can't tell clients apart — no forwarding header arrives, or one
@@ -177,6 +181,26 @@ unattributable request of any kind, which meant a single local `curl` at boot
 pinned it to `true` for the process lifetime and it never reported anything
 again. If you are reading an older relay's dashboard, that is what you are
 seeing.)
+
+**The verdict is a proportion, and `inWindow` is where you read it.** "Can the
+relay tell clients apart" is a claim about a population, so asking whether *any*
+distinct client showed up gets it wrong in the direction with no complainant: one
+health check from a real address, arriving every few minutes, is enough to answer
+yes while everything else collapses into one bucket. `clientAttribution.state`
+reports three things instead:
+
+| `state` | what it means | when |
+| --- | --- | --- |
+| `ok` | attribution is working | under 10% of requests unattributable |
+| `partial` | **some** clients share a bucket — a second ingress, or one listener of several, not forwarding | ≥10% unattributable, over at least 20 requests in the window |
+| `indistinguishable` | most or all traffic shares one bucket | >50% unattributable |
+
+`partial` is the one worth knowing about, because it is the failure that keeps
+looking healthy: genuine clients keep arriving the whole time. It also fires on a
+relay with no proxy at all that gets a steady trickle of local traffic — check
+where the requests come from before you change any proxy config. The `partial`
+band needs 20 requests in the window before it will say anything, because at ten
+requests a tenth is one request, and one local `curl` is not a fault.
 
 That is a deliberate fail-open, and it is narrow: it applies only to the
 anonymous directory-read limit, and only to requests that are actually
