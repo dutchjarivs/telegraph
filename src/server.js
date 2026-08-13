@@ -27,6 +27,11 @@ export const DEFAULT_LIMITS = {
   msgWindowMs: 10 * 60_000,
   mailboxCap: 500,
   messageTtlMs: 0, // 0 = wires never expire; > 0 drops mailbox wires older than this
+  // How many recent collection-latency samples the percentiles are computed
+  // over. Configurable so the saturated path — where the window stops being
+  // every collection and starts being the last N — is reachable by a test
+  // instead of only by a relay that has run long enough to get there.
+  latencyWindow: 1000,
   // Long-poll: GET /v1/inbox?wait=N holds the connection until a wire lands.
   // Capped well under the 100s idle timeout typical of proxies (cloudflared,
   // nginx) so the relay answers before the proxy gives up on it.
@@ -170,15 +175,87 @@ export function createServer({
     if (LIMITS.bodyBytes < needed) LIMITS.bodyBytes = needed;
   }
   const store = new Storage(dataDir);
+  // Lightweight in-memory operational metrics for the operator dashboard. Reset
+  // when the process restarts — always surfaced with `sinceStart` so a figure is
+  // never mistaken for an all-time total. Cheap counters plus a small bounded
+  // window of collection-latency samples (how long a wire waited in the mailbox
+  // before the recipient collected it), which is the latency that actually
+  // matters for a store-and-forward relay.
+  //
+  // The counters are deliberately three, not one. `accepted` is the sender's
+  // step: the relay took the wire and charged for it. `collected` is the
+  // recipient's step: they acked it. `expiredUncollected` is the outcome where
+  // those two diverge for good — the relay was paid and the recipient never got
+  // anything. A single counter named for the recipient's action but incremented
+  // at the sender's step cannot tell those apart, and the third one is the only
+  // record that could ever say a payer was charged for nothing.
+  const LATENCY_WINDOW = LIMITS.latencyWindow > 0 ? LIMITS.latencyWindow : DEFAULT_LIMITS.latencyWindow;
+  const metrics = {
+    since: Date.now(),
+    accepted: 0, // wires taken into a mailbox and billed (the sender's step)
+    collected: 0, // wires the recipient acked (the recipient's step)
+    expiredUncollected: 0, // accepted, billed, aged out before anyone collected
+    duplicate: 0,
+    tokensBilled: 0,
+    rejected: Object.create(null), // reason -> count (policy/quota refusals)
+    latencySamples: [],
+  };
+  const bumpReject = (reason) => { metrics.rejected[reason] = (metrics.rejected[reason] ?? 0) + 1; };
+  const bumpAccept = (tokens) => { metrics.accepted += 1; metrics.tokensBilled += tokens; };
+  const bumpCollect = (ms) => {
+    metrics.collected += 1;
+    if (!(ms >= 0)) return;
+    metrics.latencySamples.push(ms);
+    if (metrics.latencySamples.length > LATENCY_WINDOW) metrics.latencySamples.shift();
+  };
+  const metricsSnapshot = () => {
+    const s = metrics.latencySamples.slice().sort((a, b) => a - b);
+    const pct = (p) => (s.length ? s[Math.min(s.length - 1, Math.floor((p / 100) * s.length))] : null);
+    const rejectedTotal = Object.values(metrics.rejected).reduce((a, b) => a + b, 0);
+    return {
+      sinceStart: metrics.since,
+      wires: {
+        accepted: metrics.accepted,
+        collected: metrics.collected,
+        expiredUncollected: metrics.expiredUncollected,
+        duplicate: metrics.duplicate,
+        rejected: rejectedTotal,
+        rejectedByReason: { ...metrics.rejected },
+      },
+      tokensBilled: metrics.tokensBilled,
+      // Percentiles over a sliding window of the most recent collections, with
+      // the denominator they were computed against. `window` saturates at
+      // `windowCap`; `observations` does not, so a p95 drawn from the last 1000
+      // of a million collections says so instead of reading like all of them.
+      // Note `accepted` and `collected` do not share a population: a wire
+      // accepted before the last restart and collected after it lands in one
+      // counter only, so their difference is not a backlog.
+      collectionLatencyMs: {
+        p50: pct(50),
+        p95: pct(95),
+        max: s.length ? s[s.length - 1] : null,
+        observations: metrics.collected,
+        window: s.length,
+        windowCap: LATENCY_WINDOW,
+        truncated: metrics.collected > s.length,
+      },
+    };
+  };
   // With a TTL set, expired wires are pruned lazily on every mailbox load —
   // they stop being visible, deliverable-against (cap space frees up), and
   // reportable the moment they age out, with no background sweeper to run.
+  // Every pruned wire was accepted and billed and is now gone uncollected, so
+  // the prune counts itself: without that, the one outcome the payer would most
+  // want on the record is the one the relay keeps no trace of.
   const loadMailbox = (address) => {
     const mailbox = store.loadMailbox(address);
     if (!(LIMITS.messageTtlMs > 0)) return mailbox;
     const cutoff = Date.now() - LIMITS.messageTtlMs;
     const fresh = mailbox.filter((m) => m.receivedAt >= cutoff);
-    if (fresh.length !== mailbox.length) store.saveMailbox(address, fresh);
+    if (fresh.length !== mailbox.length) {
+      metrics.expiredUncollected += mailbox.length - fresh.length;
+      store.saveMailbox(address, fresh);
+    }
     return fresh;
   };
   // Record an operator (admin-token) mutation to the append-only audit trail.
@@ -193,44 +270,6 @@ export function createServer({
       sourceIp: clientIp(req),
       ...details,
     });
-  };
-  // Lightweight in-memory operational metrics for the operator dashboard. Reset
-  // when the process restarts — always surfaced with `sinceStart` so a figure is
-  // never mistaken for an all-time total. Cheap counters plus a small bounded
-  // reservoir of collection-latency samples (how long a wire waited in the
-  // mailbox before the recipient fetched it), which is the latency that actually
-  // matters for a store-and-forward relay.
-  const LATENCY_RESERVOIR = 1000;
-  const metrics = {
-    since: Date.now(),
-    delivered: 0,
-    duplicate: 0,
-    tokensBilled: 0,
-    rejected: Object.create(null), // reason -> count (policy/quota refusals)
-    latencySamples: [],
-  };
-  const bumpReject = (reason) => { metrics.rejected[reason] = (metrics.rejected[reason] ?? 0) + 1; };
-  const bumpDeliver = (tokens) => { metrics.delivered += 1; metrics.tokensBilled += tokens; };
-  const bumpLatency = (ms) => {
-    if (!(ms >= 0)) return;
-    metrics.latencySamples.push(ms);
-    if (metrics.latencySamples.length > LATENCY_RESERVOIR) metrics.latencySamples.shift();
-  };
-  const metricsSnapshot = () => {
-    const s = metrics.latencySamples.slice().sort((a, b) => a - b);
-    const pct = (p) => (s.length ? s[Math.min(s.length - 1, Math.floor((p / 100) * s.length))] : null);
-    const rejectedTotal = Object.values(metrics.rejected).reduce((a, b) => a + b, 0);
-    return {
-      sinceStart: metrics.since,
-      wires: {
-        delivered: metrics.delivered,
-        duplicate: metrics.duplicate,
-        rejected: rejectedTotal,
-        rejectedByReason: { ...metrics.rejected },
-      },
-      tokensBilled: metrics.tokensBilled,
-      collectionLatencyMs: { p50: pct(50), p95: pct(95), max: s.length ? s[s.length - 1] : null, samples: s.length },
-    };
   };
   const rateMap = new Map();
   const registerMap = new Map();
@@ -961,7 +1000,7 @@ export function createServer({
       // recipient can still verify it even after the live record is gone.
       mailbox.push({ id, to, from, nonce, ciphertext, ts, sig, receivedAt: Date.now(), senderRecord: sender });
       store.saveMailbox(to, mailbox);
-      bumpDeliver(tokens);
+      bumpAccept(tokens);
       // Per-sender quota counter: only counts committed deliveries, so a wire
       // that failed any earlier check (blocked, not-allowlisted, over-quota,
       // 402, duplicate, idempotent replay) never burns the sender's daily budget.
@@ -1102,12 +1141,16 @@ export function createServer({
       const ids = new Set(body.ids);
       const mailbox = loadMailbox(auth.address);
       const keep = mailbox.filter((m) => !ids.has(m.id));
-      // Collection latency: how long each acked wire sat in the mailbox before
-      // the recipient picked it up. The signal that matters for a store-and-
-      // forward relay — delivery itself is synchronous.
+      // The collection counter and its latency. This is the only place in the
+      // relay where the *recipient* attests to having taken a wire — everything
+      // upstream of here is the relay's own acceptance. Counted per wire that
+      // was actually in this mailbox, so acking an unknown or already-collected
+      // id adds nothing; a wire missing its receivedAt still counts as
+      // collected, it just contributes no latency sample.
       const now = Date.now();
       for (const m of mailbox) {
-        if (ids.has(m.id) && typeof m.receivedAt === 'number') bumpLatency(now - m.receivedAt);
+        if (!ids.has(m.id)) continue;
+        bumpCollect(typeof m.receivedAt === 'number' ? now - m.receivedAt : undefined);
       }
       // Optional signed delivery receipts. The recipient may include a receipt
       // for each wire it is acking; the relay verifies each against the

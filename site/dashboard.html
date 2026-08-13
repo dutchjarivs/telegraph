@@ -365,12 +365,22 @@ function render(o) {
   if (m) {
     const lat = m.collectionLatencyMs || {};
     const latTxt = lat.p50 == null ? '—' : `${fmtDur(lat.p50)} / ${fmtDur(lat.p95)}`;
+    // Accepted and collected are separate tiles on purpose: one is what the
+    // relay took and billed for, the other is what a recipient acked. They do
+    // not share a population across a restart, so neither tile subtracts.
+    const latSub = lat.truncated
+      ? `p50 / p95 · last ${full(lat.window)} of ${full(lat.observations)} collections`
+      : `p50 / p95 wait before pickup · ${full(lat.observations || 0)} collections`;
     kpis.push(
-      tile('Wires delivered', full(m.wires.delivered), `${full(m.wires.duplicate)} duplicate · since ${ago(m.sinceStart)}`),
+      tile('Wires accepted', full(m.wires.accepted), `taken and billed · ${full(m.wires.duplicate)} duplicate · since ${ago(m.sinceStart)}`),
+      tile('Wires collected', full(m.wires.collected), 'acked by the recipient · since relay start'),
       tile('Failed deliveries', full(m.wires.rejected), rejectBreakdown(m.wires.rejectedByReason)),
       tile('Tokens billed', compact(m.tokensBilled), 'since relay start'),
-      tile('Collection latency', latTxt, `p50 / p95 wait before pickup · ${full(lat.samples || 0)} samples`),
+      tile('Collection latency', latTxt, latSub),
     );
+    if (m.wires.expiredUncollected > 0) {
+      kpis.push(tile('Expired uncollected', full(m.wires.expiredUncollected), '⚠ billed to the sender, never collected — no refund path'));
+    }
   }
   $('kpis').innerHTML = kpis.join('');
 
