@@ -237,6 +237,25 @@ export class Storage {
     return Object.hasOwn(fromMap, to) ? fromMap[to] : 0;
   }
 
+  // Every sender who has delivered to this recipient today, with counts —
+  // read out of the same map `todaySenderCount` decides on, so the quota view
+  // and the quota gate can never disagree. Without this the counter has one
+  // writer, one reader inside the gate, and no way for the recipient who set
+  // the cap to see it being enforced.
+  todayCountsFor(recipient) {
+    const today = new Date().toISOString().slice(0, 10);
+    for (const day of Object.keys(this.quotaCounts)) {
+      if (day !== today) delete this.quotaCounts[day];
+    }
+    const d = this.quotaCounts[today] || {};
+    const senders = {};
+    for (const from of Object.keys(d)) {
+      const n = Object.hasOwn(d[from], recipient) ? d[from][recipient] : 0;
+      if (n > 0) senders[from] = n;
+    }
+    return { day: today, senders };
+  }
+
   // Increment today's delivery count for a (from, to) pair. Called only after a
   // wire has passed all checks and is committed to the mailbox.
   bumpSenderCount(from, to) {

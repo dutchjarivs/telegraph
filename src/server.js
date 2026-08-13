@@ -911,7 +911,14 @@ export function createServer({
       // list is an explicit trust signal, and the quota is for everyone else.
       const { entries: allowEntries } = store.getAllowlist(to);
       const isExplicitlyAllowed = Object.hasOwn(allowEntries, from);
-      if (quota.perSenderDailyMax > 0 && from !== to && !isExplicitlyAllowed) {
+      // One predicate, read by both the refusal below and the counter bump after
+      // delivery. They were written separately once — the gate exempted self and
+      // allowlisted senders, the bump counted everyone — so the counter accrued
+      // rows for senders the gate would never consult. Nothing read the counter,
+      // so nothing could disagree out loud; the first view of it would have
+      // reported enforcement against parties that were never enforced on.
+      const quotaApplies = quota.perSenderDailyMax > 0 && from !== to && !isExplicitlyAllowed;
+      if (quotaApplies) {
         const todayCount = store.todaySenderCount(from, to);
         if (todayCount >= quota.perSenderDailyMax) {
           bumpReject('sender_quota_exceeded');
@@ -958,7 +965,7 @@ export function createServer({
       // Per-sender quota counter: only counts committed deliveries, so a wire
       // that failed any earlier check (blocked, not-allowlisted, over-quota,
       // 402, duplicate, idempotent replay) never burns the sender's daily budget.
-      if (quota.perSenderDailyMax > 0) store.bumpSenderCount(from, to);
+      if (quotaApplies) store.bumpSenderCount(from, to);
       seen[id] = Date.now();
       store.saveSeen(to, seen);
       // Record the idempotency key now that the wire is committed — never
@@ -1422,7 +1429,27 @@ export function createServer({
       const auth = checkAuth(req, url.pathname, sha256hex(''));
       if (auth.error) return send(res, auth.status, { error: auth.error, ...(auth.hint ? { hint: auth.hint } : {}) });
       const q = store.getQuota(auth.address);
-      return send(res, 200, { perSenderDailyMax: q.perSenderDailyMax });
+      // Return the enforcement, not just the policy. The gate decides on the
+      // pair (perSenderDailyMax, today's per-sender count); a view that shows
+      // only the first tells you what you asked for and nothing about what the
+      // relay is doing with it — you'd learn your cap was working by a stranger
+      // hitting the wall and telling you.
+      const { day, senders } = store.todayCountsFor(auth.address);
+      const counts = Object.entries(senders)
+        .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+        .map(([address, delivered]) => ({
+          address,
+          delivered,
+          ...(q.perSenderDailyMax > 0 ? { remaining: Math.max(0, q.perSenderDailyMax - delivered) } : {}),
+        }));
+      return send(res, 200, {
+        perSenderDailyMax: q.perSenderDailyMax,
+        day,
+        senders: counts,
+        hint: q.perSenderDailyMax === 0
+          ? 'quota disabled (unlimited) — senders listed here are counted only while a quota is set, so this list is empty until you set one'
+          : `counted today against your cap of ${q.perSenderDailyMax}/sender/day; allowlisted senders and your own address are exempt and never counted`,
+      });
     }
 
     // --- Webhooks / push delivery (signed) ---

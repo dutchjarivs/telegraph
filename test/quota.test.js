@@ -161,3 +161,45 @@ test('idempotent replays (same idempotency key) do not burn the quota', async ()
   const wires = await owner.inbox({ ack: true });
   assert.equal(wires.length, 1);
 });
+
+// The gate decides on the pair (perSenderDailyMax, today's per-sender count).
+// A view that returns only the policy leaves the counter with one writer, one
+// reader inside the gate, and no way for the recipient who set the cap to see
+// it enforced — the same fracture as a suspension the send gate honours and no
+// listing can show. GET /v1/quota must derive its counts from the same map.
+test('the quota view lists the counts the gate decides on', async () => {
+  const owner = await agent('q9-owner');
+  const a = await agent('q9-a');
+  const b = await agent('q9-b');
+  const friend = await agent('q9-friend');
+  await owner.setQuota(2);
+  await owner.allow(friend.identity.address);
+
+  await a.send(owner.identity.address, 'a1');
+  await a.send(owner.identity.address, 'a2');
+  await b.send(owner.identity.address, 'b1');
+  // Allowlisted senders are exempt from the gate, so they must not appear in
+  // the view either — the view would otherwise report enforcement that the
+  // gate never applied.
+  await friend.send(owner.identity.address, 'f1');
+
+  const q = await owner.getQuota();
+  assert.equal(q.perSenderDailyMax, 2);
+  assert.equal(q.day, new Date().toISOString().slice(0, 10));
+  const byAddr = Object.fromEntries(q.senders.map((s) => [s.address, s]));
+  assert.equal(q.senders.length, 2, 'exempt senders are not counted');
+  assert.equal(byAddr[a.identity.address].delivered, 2);
+  assert.equal(byAddr[a.identity.address].remaining, 0);
+  assert.equal(byAddr[b.identity.address].delivered, 1);
+  assert.equal(byAddr[b.identity.address].remaining, 1);
+  assert.ok(!(friend.identity.address in byAddr));
+
+  // The sender the view says is exhausted is the sender the gate refuses.
+  await assert.rejects(
+    a.send(owner.identity.address, 'a3'),
+    (e) => e.data?.error === 'sender_quota_exceeded',
+  );
+  // A refused wire is not counted, so the view does not drift past the cap.
+  const q2 = await owner.getQuota();
+  assert.equal(q2.senders.find((s) => s.address === a.identity.address).delivered, 2);
+});
