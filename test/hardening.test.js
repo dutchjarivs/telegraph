@@ -600,3 +600,87 @@ test('a sample floor never makes more unattributable traffic read quieter than l
     + 'because it is one request under the sample floor');
   assert.equal(worse.state, 'insufficient_sample');
 });
+
+// The producer split `insufficient_sample` out of `ok`; the only consumer put
+// them back (2026-08-13, found by @hermessol from the commit message alone).
+//
+// `clientIpsIndistinguishable` was computed as `state === 'indistinguishable' ||
+// state === 'partial'` — a positive list of the loud states with an implicit
+// else. Unevaluated and passed both fell to the quiet branch, so the previous
+// commit's whole distinction survived exactly as far as the next line of the
+// same file, and the test that asserted the emitted string still passed. A
+// green test and byte-identical behaviour.
+//
+// The boolean cannot carry the distinction — that is what a boolean is. So the
+// fix is to publish the third fact beside it rather than expect a reader to
+// re-derive it from a list of state names they maintain themselves.
+test('a band that did not run is distinguishable from one that passed, at the consumer', async () => {
+  const run = async (distinctCount, unattributableCount) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegraph-attribution-evaluated-'));
+    const srv = createServer({
+      dataDir: dir,
+      trustProxy: true,
+      adminToken: 'admin-tok',
+      attributionWindowMs: 60_000,
+      limits: { lookupRate: { windowMs: 60_000, max: 1000 } },
+      log: () => {},
+    });
+    await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+    const b = `http://127.0.0.1:${srv.address().port}`;
+    try {
+      for (let i = 0; i < distinctCount; i += 1) {
+        await fetch(`${b}/v1/directory`, { headers: { 'cf-connecting-ip': `203.0.113.${(i % 250) + 1}` } });
+      }
+      for (let i = 0; i < unattributableCount; i += 1) await fetch(`${b}/v1/directory`);
+      return (await (await fetch(`${b}/v1/admin/overview`, {
+        headers: { 'x-telegraph-admin': 'admin-tok' },
+      })).json()).health;
+    } finally {
+      await new Promise((resolve) => srv.close(resolve));
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  const unevaluated = await run(9, 1);   // 10% of 10 — over the fraction, under the floor
+  const passed = await run(38, 2);       // 5% of 40 — evaluated, and clean
+  const faulted = await run(38, 12);     // 24% of 50 — evaluated, and a fault
+
+  // The boolean agrees on the first two. That agreement is the bug: it is why
+  // asserting only `clientIpsIndistinguishable` could never have caught this.
+  assert.equal(unevaluated.clientIpsIndistinguishable, false);
+  assert.equal(passed.clientIpsIndistinguishable, false);
+  assert.equal(faulted.clientIpsIndistinguishable, true);
+
+  // A consumer can now tell them apart without keeping its own list of which
+  // state names count as evaluated — the list that goes stale the moment a
+  // sixth state is added and reads healthy by default.
+  assert.equal(unevaluated.clientAttribution.state, 'insufficient_sample');
+  assert.equal(unevaluated.clientAttribution.evaluated, false,
+    'under the sample floor the band did not run, and a reader must be able to see that '
+    + 'without inferring it from the state name');
+  assert.equal(passed.clientAttribution.state, 'ok');
+  assert.equal(passed.clientAttribution.evaluated, true);
+  assert.equal(faulted.clientAttribution.state, 'partial');
+  assert.equal(faulted.clientAttribution.evaluated, true);
+
+  // No traffic at all is also not a pass. Same trap, different door: a relay
+  // nobody has called yet has not demonstrated that attribution works.
+  const idle = await run(0, 0);
+  assert.equal(idle.clientAttribution.state, 'no_traffic');
+  assert.equal(idle.clientAttribution.evaluated, false);
+  assert.equal(idle.clientIpsIndistinguishable, false,
+    'silence is not a fault claim either — but it is not a clean bill of health');
+});
+
+// A measurement that cannot say which build produced it will eventually be
+// filed under the wrong one — I have already done that to a published number.
+// `release` moves on a publish, not on a commit, so it cannot separate the
+// deployed code from six commits waiting for a restart.
+test('health names the build it was measured on, not just the release', async () => {
+  const res = await fetch(`${base}/v1/health`);
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  assert.ok('build' in body, 'the field must be present even when it is null, '
+    + 'or its absence reads as an old relay rather than as a non-git deploy');
+  if (body.build !== null) assert.match(body.build, /^[0-9a-f]{7}$/);
+});

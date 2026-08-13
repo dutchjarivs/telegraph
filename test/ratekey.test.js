@@ -136,3 +136,92 @@ test('a genuinely different /64 still gets its own registration budget', async (
   assert.equal((await registerFrom(base, '::ffff:203.0.113.7', 'n5')).status, 200);
   assert.equal((await registerFrom(base, '::ffff:198.51.100.9', 'n6')).status, 200);
 });
+
+// The two per-IP gates in this process fail in opposite directions, and only
+// one of them ever said so (2026-08-13).
+//
+// Directory reads SKIP the limit when the client can't be told apart, because
+// throttling one shared bucket would 429 every agent at once and the status quo
+// for a read is no limit anyway. Registration cannot take that trade: what it
+// guards is a stock, not a rate — every identity minted carries a free daily
+// grant forever, and nothing retires one. So it stays closed.
+//
+// But closed on a collapsed bucket is not "5 per network", it is 5 for the whole
+// internet, and the agent it turns away is a stranger on their first request who
+// simply leaves. That denial had no counter and no distinguishable error code:
+// it serialized exactly like the anti-sybil control working as designed. A false
+// red with no complainant, on the one path where the complainant is the customer.
+test('a registration refused by a shared bucket is not reported as the sybil cap working', async (t) => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegraph-register-shared-'));
+  const server = createServer({
+    dataDir,
+    // trustProxy OFF while a forwarding header is present is one of the two ways
+    // clientsAreIndistinguishable() fires — the different-host-proxy case.
+    trustProxy: false,
+    adminToken: 'admin-tok',
+    limits: { registerRate: { windowMs: 60 * 60_000, max: 2 } },
+    log: () => {},
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+  const health = async () => (await (await fetch(`${base}/v1/admin/overview`, {
+    headers: { 'x-telegraph-admin': 'admin-tok' },
+  })).json()).health;
+
+  // Three different networks, all collapsing to the relay's socket address
+  // because their forwarding header is not trusted. The third is a stranger who
+  // did nothing wrong.
+  assert.equal((await registerFrom(base, '203.0.113.10', 'shared1')).status, 200);
+  assert.equal((await registerFrom(base, '198.51.100.11', 'shared2')).status, 200);
+  const turnedAway = await registerFrom(base, '192.0.2.12', 'shared3');
+  assert.equal(turnedAway.status, 429);
+  const body = await turnedAway.json();
+
+  // The error code has to differ, because the two 429s call for opposite work:
+  // one is "you are minting identities too fast", the other is "this relay is
+  // misconfigured and it is not your fault".
+  assert.equal(body.error, 'registration_rate_limited_shared_bucket');
+  assert.match(body.hint, /cannot tell clients apart/);
+
+  // And it has to leave a number behind. The stranger is already gone; the
+  // counter is the only thing that can still file the bug on their behalf.
+  const after = await health();
+  assert.equal(after.clientAttribution.registrationsDeniedWhileUnattributable, 1);
+});
+
+// Same cap, attribution working: the ordinary anti-sybil 429, unchanged. Without
+// this arm the test above passes on a relay that emits the shared-bucket code
+// for every refusal, which would be the mirror-image lie.
+test('with attribution working the registration cap reports itself as the sybil cap', async (t) => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegraph-register-attributed-'));
+  const server = createServer({
+    dataDir,
+    trustProxy: true,
+    adminToken: 'admin-tok',
+    limits: { registerRate: { windowMs: 60 * 60_000, max: 2 } },
+    log: () => {},
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  // One network minting three identities — the case the cap exists for.
+  assert.equal((await registerFrom(base, '203.0.113.20', 'sybil1')).status, 200);
+  assert.equal((await registerFrom(base, '203.0.113.20', 'sybil2')).status, 200);
+  const capped = await registerFrom(base, '203.0.113.20', 'sybil3');
+  assert.equal(capped.status, 429);
+  assert.equal((await capped.json()).error, 'registration_rate_limited');
+
+  const health = (await (await fetch(`${base}/v1/admin/overview`, {
+    headers: { 'x-telegraph-admin': 'admin-tok' },
+  })).json()).health;
+  assert.equal(health.clientAttribution.registrationsDeniedWhileUnattributable, 0,
+    'a genuine sybil refusal must not be counted as a relay misconfiguration');
+});

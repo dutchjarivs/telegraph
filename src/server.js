@@ -290,6 +290,11 @@ export function createServer({
     total: 0, distinct: 0, loopback: 0, untrusted_proxy_header: 0,
     lastDistinctAt: 0, lastUnattributableAt: 0,
   };
+  // Signups refused by the anti-sybil cap while that cap was keyed on a bucket
+  // the whole internet shares. Counted separately from ordinary 429s because
+  // the two mean opposite things: one is the control working, the other is the
+  // control turning away honest strangers who will not file a bug.
+  let registerDeniedUnattributable = 0;
   // Long enough that a relay between clients doesn't flap, short enough that a
   // proxy that regresses is reported the same day. This is a dashboard, not a
   // pager.
@@ -318,6 +323,37 @@ export function createServer({
   const ATTRIBUTION_MAJORITY = 0.5;
   const ATTRIBUTION_PARTIAL_FRACTION = 0.1;
   const ATTRIBUTION_PARTIAL_MIN_SAMPLE = 20;
+  // Every state this classifier can emit, and what a reader is entitled to
+  // conclude from it. One table, because the last three bugs in this code were
+  // all a *reader* re-deriving the verdict with its own list of state names.
+  //
+  // Splitting `insufficient_sample` out of `ok` at the producer accomplishes
+  // nothing if the consumer writes `state === 'indistinguishable' || state ===
+  // 'partial'` and lets everything else fall to false: unevaluated and passed
+  // land on the same branch again, one layer down, and the test that asserts the
+  // emitted string still passes. A positive list of the loud states has an
+  // implicit else, and the implicit else of a status reader is always the quiet
+  // one — so the next state added here is silently healthy until someone
+  // notices. Enumerate instead, and make an unlisted state throw: a state with
+  // no entry is a programming error, and it should surface as a failing test
+  // rather than as a green dashboard.
+  //
+  //   faulted   — the operator is being told something is wrong.
+  //   evaluated — the band actually ran. `no_traffic` and `insufficient_sample`
+  //               are both not-faulted *and* not-evaluated, which is a different
+  //               thing from `ok` and must stay tellable apart from it.
+  const ATTRIBUTION_STATES = {
+    no_traffic: { faulted: false, evaluated: false },
+    insufficient_sample: { faulted: false, evaluated: false },
+    ok: { faulted: false, evaluated: true },
+    partial: { faulted: true, evaluated: true },
+    indistinguishable: { faulted: true, evaluated: true },
+  };
+  function attributionVerdict(state) {
+    const entry = ATTRIBUTION_STATES[state];
+    if (!entry) throw new Error(`unclassified attribution state: ${state}`);
+    return entry;
+  }
   // In-window counts need buckets, not a running total: a counter cannot forget
   // and two timestamps cannot count. Twelve slices per window, summed over the
   // slices that are still in range — bounded memory, and the resolution error is
@@ -486,6 +522,26 @@ export function createServer({
   try {
     pkgVersion = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version ?? '0';
   } catch { /* keep default */ }
+  // Which build produced a number is part of the number.
+  //
+  // `release` is the package version, which only moves on a publish — so every
+  // measurement taken between two publishes serialises identically whether it
+  // came from the deployed code or from six commits that haven't restarted yet.
+  // The only witness to which side of a restart a reading sits on was the
+  // operator's memory of when they restarted, and that has already mislabelled
+  // one of my published measurements. Read the checked-out commit at boot and
+  // publish it, so a reading carries its own build and cannot drift a generation.
+  // Best-effort: a deploy from a tarball has no .git and simply reports null.
+  let buildCommit = null;
+  try {
+    const gitDir = new URL('../.git/', import.meta.url);
+    const head = fs.readFileSync(new URL('HEAD', gitDir), 'utf8').trim();
+    const ref = head.startsWith('ref: ') ? head.slice(5).trim() : null;
+    const sha = ref
+      ? fs.readFileSync(new URL(ref, gitDir), 'utf8').trim()
+      : head;
+    if (/^[0-9a-f]{40}$/.test(sha)) buildCommit = sha.slice(0, 7);
+  } catch { /* not a git checkout — leave null rather than guess */ }
   const siteFile = new URL('../site/index.html', import.meta.url);
   const dashboardFile = new URL('../site/dashboard.html', import.meta.url);
   const ownerFile = new URL('../site/owner.html', import.meta.url);
@@ -648,6 +704,7 @@ export function createServer({
         service: 'telegraph',
         version: 1,
         release: pkgVersion,
+        build: buildCommit,
         uptimeSeconds: Math.round(process.uptime()),
         agents: store.listAgents().length,
         now: Date.now(),
@@ -760,11 +817,42 @@ export function createServer({
       // address, or IPv6 /64 — see rateKeyForIp; per-address IPv6 buckets are
       // free for the client to rotate, which makes the cap unenforceable).
       // Updating an existing registration (same address) is always allowed.
-      if (!prev && !allowHit(registerMap, rateKeyForIp(clientIp(req)), LIMITS.registerRate)) {
-        return send(res, 429, {
-          error: 'registration_rate_limited',
-          hint: `max ${LIMITS.registerRate.max} new registrations per ${Math.round(LIMITS.registerRate.windowMs / 60_000)} min per client network (IPv4 address, or IPv6 /64)`,
-        });
+      if (!prev) {
+        const ip = clientIp(req);
+        // The two per-IP gates in this process fail in OPPOSITE directions, and
+        // until now only one of them said so.
+        //
+        // Directory reads skip the limit when the client can't be told apart
+        // (see allowLookup): the status quo for a read is no limit at all, so
+        // failing open costs nothing, while throttling one shared bucket would
+        // 429 every agent at once. Registration cannot take that trade. What it
+        // guards is not a rate but a *stock* — each new identity carries
+        // freeDailyTokens every UTC day, permanently, and nothing retires a
+        // registration. Failing open there doesn't loosen a limit, it removes
+        // the only bound on an unbounded grant.
+        //
+        // So this gate stays closed. But a closed gate on a collapsed bucket is
+        // no longer "5 per network" — it is 5 for the entire internet, and the
+        // agent who hits it is a stranger who gets a 429 on their first request
+        // and never comes back. That is a false red with nobody to file it:
+        // invisible in the logs of a relay whose whole problem is that nobody
+        // signs up. Give it a complainant. Distinct error code, hint that names
+        // the real state, and a counter in health so the denial is a number the
+        // operator can see instead of a stranger they never met.
+        const shared = clientsAreIndistinguishable(req, ip) !== null;
+        if (!allowHit(registerMap, rateKeyForIp(ip), LIMITS.registerRate)) {
+          if (shared) {
+            registerDeniedUnattributable += 1;
+            return send(res, 429, {
+              error: 'registration_rate_limited_shared_bucket',
+              hint: `this relay currently cannot tell clients apart (see health.clientAttribution), so the ${LIMITS.registerRate.max}-per-${Math.round(LIMITS.registerRate.windowMs / 60_000)}-min new-registration cap is being applied to all traffic as one bucket rather than per network. This is a relay-side misconfiguration, not something you did — retry shortly, and if you are the operator, check TELEGRAPH_TRUST_PROXY in docs/DEPLOY.md.`,
+            });
+          }
+          return send(res, 429, {
+            error: 'registration_rate_limited',
+            hint: `max ${LIMITS.registerRate.max} new registrations per ${Math.round(LIMITS.registerRate.windowMs / 60_000)} min per client network (IPv4 address, or IPv6 /64)`,
+          });
+        }
       }
       store.upsertAgent({
         address,
@@ -1801,8 +1889,11 @@ export function createServer({
         // rather than let a skipped rate limit look like an enforced one.
         health: ((attribution) => ({
           trustProxy,
-          clientIpsIndistinguishable: attribution.state === 'indistinguishable'
-            || attribution.state === 'partial',
+          // Read the verdict from the table rather than restating it. This line
+          // used to carry its own copy of the state list — the canonical
+          // predicate right below it was dead code, and the two were free to
+          // disagree the moment a state was added to one of them.
+          clientIpsIndistinguishable: attributionVerdict(attribution.state).faulted,
           // The counts, not just the verdict: "12 loopback, 4000 distinct" and
           // "12 loopback, 0 distinct" produce very different work, and the
           // operator should not have to take the verdict's word for which they
@@ -1825,6 +1916,11 @@ export function createServer({
             // relay at 0.0 is healthy, and only one of those two facts survives
             // being rendered as a boolean.
             state: attribution.state,
+            // Publish whether the band actually ran, not just its name. A reader
+            // that only gets a string has to keep its own list of which states
+            // mean "evaluated", which is the duplication this table exists to
+            // remove — and an unlisted state in *their* copy reads as healthy.
+            evaluated: attributionVerdict(attribution.state).evaluated,
             inWindow: {
               observed: attribution.observed,
               unattributable: attribution.unattributable,
@@ -1837,6 +1933,12 @@ export function createServer({
               partialAtOrAbove: ATTRIBUTION_PARTIAL_FRACTION,
               partialMinObserved: ATTRIBUTION_PARTIAL_MIN_SAMPLE,
             },
+            // Nonzero means the anti-sybil cap turned away at least one new
+            // agent while it was keyed on a bucket everybody shares. Those are
+            // signups this relay refused for its own misconfiguration, and they
+            // are the one consequence of an attribution failure that costs
+            // something irreversible — the stranger is already gone.
+            registrationsDeniedWhileUnattributable: registerDeniedUnattributable,
           },
           ...(attribution.state === 'partial' ? {
             warning: 'part of the traffic in this window could not be attributed to a distinct ' +
@@ -2155,7 +2257,17 @@ export function createServer({
   // and it is the right trade here: the status quo for these endpoints is no
   // limit at all, so skipping can never be worse than today, whereas throttling
   // everyone at once would be a self-inflicted outage. The operator gets told
-  // once, loudly, and `telegraph doctor` reports it — see indistinctClients.
+  // once, loudly, and it is published as health.clientAttribution in
+  // GET /v1/admin/overview. (This comment used to promise that `telegraph
+  // doctor` reported it too, and pointed at an `indistinctClients` that has
+  // never existed anywhere in this repo. Neither was true. A dangling referent
+  // in a comment is the same defect as the rest of this file's history: a claim
+  // with nothing on the other end of it, which nothing checks.)
+  //
+  // Registration does NOT skip its gate in this state — the trade that makes
+  // skipping safe for reads does not hold for a grant that never expires. See
+  // POST /v1/register, and health.clientAttribution
+  // .registrationsDeniedWhileUnattributable for what that costs when it bites.
   // Two ways the relay ends up unable to tell one client from another:
   //
   //   1. The resolved address is loopback — a proxy on this same host that isn't
@@ -2242,8 +2354,7 @@ export function createServer({
   }
 
   function attributionIsBroken(now = Date.now()) {
-    const { state } = attributionState(now);
-    return state === 'indistinguishable' || state === 'partial';
+    return attributionVerdict(attributionState(now).state).faulted;
   }
 
   // Retry-After tells an honest client exactly when to come back, so a caller in
