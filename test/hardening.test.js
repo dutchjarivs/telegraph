@@ -529,8 +529,9 @@ test('a partial attribution failure is reported while genuine clients keep arriv
         headers: { 'x-telegraph-admin': 'admin-tok' },
       })).json()).health;
       assert.equal(quiet.clientAttribution.inWindow.unattributableFraction, 0.1);
-      assert.equal(quiet.clientAttribution.state, 'ok',
-        'at ten requests, a tenth is one request');
+      assert.equal(quiet.clientAttribution.state, 'insufficient_sample',
+        'at ten requests a tenth is one request, so the band is not evaluated — '
+        + 'but unevaluated must not serialize as passed');
       assert.equal(quiet.clientIpsIndistinguishable, false);
     } finally {
       await new Promise((resolve) => tiny.close(resolve));
@@ -550,4 +551,52 @@ test('a partial attribution failure is reported while genuine clients keep arriv
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
+});
+
+// The sample floor used to be folded into the healthy state, which made the
+// verdict non-monotone in severity: nine unattributable requests read quieter
+// than two, because nine of nineteen misses the floor and two of twenty clears
+// it. The floor belongs on the report, not on the band — under it the answer is
+// "not evaluated", which is a third thing and must serialize as a third thing.
+test('a sample floor never makes more unattributable traffic read quieter than less', async () => {
+  const run = async (distinctCount, unattributableCount) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegraph-attribution-floor-'));
+    const srv = createServer({
+      dataDir: dir,
+      trustProxy: true,
+      adminToken: 'admin-tok',
+      attributionWindowMs: 60_000,
+      limits: { lookupRate: { windowMs: 60_000, max: 1000 } },
+      log: () => {},
+    });
+    await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${srv.address().port}`;
+    try {
+      for (let i = 0; i < distinctCount; i += 1) {
+        await fetch(`${base}/v1/directory`, { headers: { 'cf-connecting-ip': `203.0.113.${(i % 250) + 1}` } });
+      }
+      for (let i = 0; i < unattributableCount; i += 1) await fetch(`${base}/v1/directory`);
+      return (await (await fetch(`${base}/v1/admin/overview`, {
+        headers: { 'x-telegraph-admin': 'admin-tok' },
+      })).json()).health.clientAttribution;
+    } finally {
+      await new Promise((resolve) => srv.close(resolve));
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  // 9 of 19 — 47% unattributable, one request short of the floor.
+  const worse = await run(10, 9);
+  assert.equal(worse.inWindow.observed, 19);
+  assert.equal(worse.inWindow.unattributable, 9);
+  // 2 of 20 — 10% unattributable, one request past the floor.
+  const better = await run(18, 2);
+  assert.equal(better.inWindow.observed, 20);
+  assert.equal(better.inWindow.unattributable, 2);
+
+  assert.equal(better.state, 'partial');
+  assert.notEqual(worse.state, 'ok',
+    'a 47% unattributable window must not report the same state as a clean one just '
+    + 'because it is one request under the sample floor');
+  assert.equal(worse.state, 'insufficient_sample');
 });

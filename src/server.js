@@ -310,7 +310,11 @@ export function createServer({
   //     not stuck, it is correct by its own definition and still wrong.
   //
   // The floor applies only to the minority band: at small samples a tenth is one
-  // request, and one local poke among nine real reads is not a fault.
+  // request, and one local poke among nine real reads is not a fault. But it is
+  // not a pass either — under the floor the band is *unevaluated*, and it says
+  // so (`insufficient_sample`) rather than falling through to `ok`. A floor
+  // folded into the healthy state deletes that distinction and makes the verdict
+  // non-monotone in severity; see attributionState.
   const ATTRIBUTION_MAJORITY = 0.5;
   const ATTRIBUTION_PARTIAL_FRACTION = 0.1;
   const ATTRIBUTION_PARTIAL_MIN_SAMPLE = 20;
@@ -2222,8 +2226,18 @@ export function createServer({
     const win = attributionWindow(now);
     if (win.observed === 0) return { state: 'no_traffic', ...win };
     if (win.fraction > ATTRIBUTION_MAJORITY) return { state: 'indistinguishable', ...win };
-    if (win.fraction >= ATTRIBUTION_PARTIAL_FRACTION
-      && win.observed >= ATTRIBUTION_PARTIAL_MIN_SAMPLE) return { state: 'partial', ...win };
+    if (win.fraction >= ATTRIBUTION_PARTIAL_FRACTION) {
+      // Above the minority fraction but below the sample floor, the band has
+      // not been evaluated — and *not evaluated* must never serialize as
+      // *passed*. Folding the floor into `ok` makes severity non-monotone:
+      // 9 unattributable of 19 (47%) misses the floor and reads ok, while
+      // 2 of 20 (10%) clears it and reads partial. Fewer bad requests, louder
+      // alarm. The floor belongs on the report, not on the band.
+      return {
+        state: win.observed >= ATTRIBUTION_PARTIAL_MIN_SAMPLE ? 'partial' : 'insufficient_sample',
+        ...win,
+      };
+    }
     return { state: 'ok', ...win };
   }
 
