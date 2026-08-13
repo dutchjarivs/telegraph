@@ -1914,6 +1914,14 @@ export function createServer({
             // see all-time counts cannot tell "no distinct clients" from "no
             // distinct clients lately", and those want different work.
             windowMs: ATTRIBUTION_WINDOW_MS,
+            // ...and the precision that number actually has. The counts are
+            // summed over aligned slices kept while `now - slot.at < window +
+            // sliceMs`, so the span behind a reading is somewhere in
+            // [windowMs, windowMs + windowResolutionMs) — never exactly
+            // windowMs. Publishing the round number alone hands a reader more
+            // precision than the mechanism has, and a reader comparing two
+            // readings is doing arithmetic with it.
+            windowResolutionMs: attributionSliceMs,
             lastDistinctAgoMs: indistinct.lastDistinctAt
               ? Date.now() - indistinct.lastDistinctAt : null,
             lastUnattributableAgoMs: indistinct.lastUnattributableAt

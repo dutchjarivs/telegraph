@@ -495,6 +495,14 @@ test('a partial attribution failure is reported while genuine clients keep arriv
     assert.equal(healthy.warning, undefined);
     assert.equal(healthy.clientAttribution.inWindow.unattributableFraction, 0.05);
 
+    // The window is published with the precision it actually has. Counts come
+    // from aligned slices, so the span behind any reading is in [window, window
+    // + resolution) — a reader told only `windowMs` would treat two readings as
+    // covering exactly the same length of time, and they never do.
+    assert.equal(healthy.clientAttribution.windowMs, 60_000);
+    assert.equal(healthy.clientAttribution.windowResolutionMs, 5_000,
+      'twelve slices of the injected window, not a hardcoded default');
+
     // Now one ingress of two stops forwarding. Genuine clients keep arriving on
     // the other one for the whole window — which is exactly what silenced the
     // existential check.
