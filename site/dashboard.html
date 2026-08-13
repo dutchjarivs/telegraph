@@ -339,14 +339,22 @@ function meter(used, cap) {
 function render(o) {
   limits = o.limits;
   const t = o.totals;
-  const r = t.reports ?? { total: 0, open: 0, flaggedAgents: 0, suspendedAgents: 0 };
+  const r = t.reports ?? { total: 0, open: 0, flaggedAgents: 0, suspendedAgents: 0, suspendedLatent: 0 };
+  // Suspensions outlive the agent record they were applied to (the address
+  // derives from the signing key, so removal must not lift a ban). Counting
+  // only the ones still in the agent list let this tile say "no suspended
+  // agents" while bans were live and firing.
+  const latent = r.suspendedLatent ?? 0;
+  const standing = [
+    r.flaggedAgents > 0 ? `${r.flaggedAgents} flagged` : null,
+    r.suspendedAgents > 0 ? `${r.suspendedAgents} suspended` : null,
+    latent > 0 ? `${latent} suspended, registration gone` : null,
+  ].filter(Boolean).join(' · ');
   const kpis = [
     tile('Agents', full(t.agents)),
     tile('Free tokens used today', compact(t.freeUsedToday), `of ${compact(t.agents * o.limits.freeDailyTokens)} pooled allowance`),
     tile('Credits outstanding', compact(t.creditsOutstanding), 'prepaid, unexpiring'),
-    tile('Open reports', full(r.open), r.flaggedAgents > 0 || r.suspendedAgents > 0
-      ? `${r.flaggedAgents} flagged · ${r.suspendedAgents} suspended`
-      : 'no flagged or suspended agents'),
+    tile('Open reports', full(r.open), standing || 'no flagged or suspended agents'),
     tile('Revenue credited', usd(t.payments.creditedCents), `${t.payments.count} payment${t.payments.count === 1 ? '' : 's'} via Stripe`),
     tile('Mailbox backlog', full(t.mailboxBacklog), `queued wires, cap ${full(o.limits.mailboxCap)}/box`),
     tile('Quotas active', full(o.quotas?.agentsWithQuota ?? 0), 'agents with per-sender daily limits'),

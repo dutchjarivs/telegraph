@@ -1639,6 +1639,18 @@ export function createServer({
       const payments = store.listPayments().sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
       const credited = payments.filter((p) => p.status === 'credited');
       const unmatched = payments.filter((p) => p.status !== 'credited');
+      // A suspension is keyed on the address, and an address derives from the
+      // signing key — so removal deliberately keeps it (re-registering brings
+      // the ban straight back). The consequence nothing accounted for: a ban
+      // outlives its agent record, and every other view of moderation state is
+      // a join over listAgents(). The send gate reads getModeration(from) by
+      // address directly, so those bans still fire; the dashboard, counting
+      // over agents, showed none of them. Enforced and unenumerable at once.
+      const registeredAddresses = new Set(agents.map((a) => a.address));
+      const latentSuspensions = Object.entries(store.moderation)
+        .filter(([address, m]) => m?.suspended && !registeredAddresses.has(address))
+        .map(([address, m]) => ({ address, note: m.note ?? '', at: m.at ?? null }))
+        .sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
       return send(res, 200, {
         ok: true,
         now: Date.now(),
@@ -1686,6 +1698,11 @@ export function createServer({
             open: reports.filter((r) => r.status === 'open').length,
             flaggedAgents: agents.filter((a) => a.reports.flagged).length,
             suspendedAgents: agents.filter((a) => a.suspended).length,
+            // Suspended addresses with no current registration. Counted apart
+            // from suspendedAgents because they are a different operator task:
+            // still enforced, not visible in the agent list, and the only way
+            // to lift one is to know it exists.
+            suspendedLatent: latentSuspensions.length,
           },
           payments: {
             count: payments.length,
@@ -1707,6 +1724,11 @@ export function createServer({
         // written at the moment each action commits.
         audit: store.listAudit(100),
         auditTotal: store.auditCount(),
+        // Bans the agent list cannot show: suspended addresses whose
+        // registration is gone. They still block sending the moment that key
+        // re-registers, so an operator reviewing or lifting enforcement needs
+        // them listed somewhere.
+        latentSuspensions,
         // How many agents have set a per-sender daily quota (non-zero).
         quotas: {
           agentsWithQuota: Object.values(store.quotas).filter((q) => q && q.perSenderDailyMax > 0).length,

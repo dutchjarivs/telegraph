@@ -116,3 +116,43 @@ test('suspension is the durable control: it survives removal and re-registration
   assert.equal(res.status, 403);
   assert.equal(res.body.error, 'sender_suspended');
 });
+
+// The ban above survives removal, which is the design. What nothing accounted
+// for is that it survives into a state no view could show: `suspendedAgents`
+// and every per-agent `suspended` field are joins over listAgents(), and a
+// removed agent is not in that list. The send gate reads moderation by address
+// directly, so the ban still fires. Enforced and unenumerable at the same time
+// — and an operator cannot lift a ban they cannot find.
+test('a suspension that outlives its agent record is still listed for the operator', async () => {
+  const grace = new TelegraphClient({ server: base, identity: TelegraphClient.generateIdentity() });
+  await grace.register({ handle: 'grace' });
+  const address = grace.identity.address;
+  await admin('/v1/admin/agents/suspend', { address, suspended: true, note: 'abuse' });
+  await admin('/v1/admin/agents/remove', { address });
+
+  const res = await fetch(base + '/v1/admin/overview', { headers: { 'x-telegraph-admin': ADMIN } });
+  const body = await res.json();
+
+  // The agent-list view genuinely has nothing to show: the record is gone.
+  assert.equal(body.agents.some((a) => a.address === address), false);
+  const countedAsAgent = body.agents.filter((a) => a.suspended).map((a) => a.address);
+  assert.equal(countedAsAgent.includes(address), false);
+  assert.equal(body.totals.reports.suspendedAgents, countedAsAgent.length);
+
+  // The enforcement is still real, so it has to appear somewhere.
+  const latent = body.latentSuspensions.find((m) => m.address === address);
+  assert.equal(body.totals.reports.suspendedLatent, body.latentSuspensions.length);
+  assert.ok(latent, 'a ban with no agent record must still be enumerable');
+  assert.equal(latent.note, 'abuse');
+
+  // And it is not a stale record: the ban fires the moment that key returns.
+  await grace.register({ handle: 'grace' });
+  const send = await sendRaw(grace, bob.identity.boxPublicKey, bob.identity.address, 'try me');
+  assert.equal(send.status, 403);
+  assert.equal(send.body.error, 'sender_suspended');
+
+  // Once it is back in the agent list, it must not be counted in both places.
+  const after = await (await fetch(base + '/v1/admin/overview', { headers: { 'x-telegraph-admin': ADMIN } })).json();
+  assert.equal(after.agents.some((a) => a.address === address && a.suspended), true);
+  assert.equal(after.latentSuspensions.some((m) => m.address === address), false);
+});
