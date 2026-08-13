@@ -561,7 +561,14 @@ export function createServer({
       const ip = clientIp(req);
       const ua = uaClass(req.headers['user-agent']);
       res.on('finish', () => {
-        log(`[telegraph] ${ip} ${method} ${pathname} ${res.statusCode} ${Date.now() - startedAt}ms ua=${ua}`);
+        // Leading ISO timestamp. Every row written before this carried none, and
+        // 39,545 of them are on disk: ordered, undated, unwindowable. A claim
+        // sourced from that log ("attribution was healthy across those fifteen
+        // days") cannot be checked against it, because the log cannot say which
+        // days it covers — only the file mtime knows, and it only knows the end.
+        // A retained artifact that can't date itself can only ever support
+        // "not firing when I looked".
+        log(`[telegraph] ${new Date().toISOString()} ${ip} ${method} ${pathname} ${res.statusCode} ${Date.now() - startedAt}ms ua=${ua}`);
       });
     }
     handle(req, res).catch((err) => {
@@ -2433,6 +2440,25 @@ export function createServer({
       req.on('error', reject);
     });
   }
+
+  // The settings that decide what this process's log rows and health readings
+  // MEAN, published so the boot banner can stamp them into the log itself.
+  // health.trustProxy already reports the live value, but the current value of a
+  // boot-time setting is not a witness to its value at any earlier boot — and
+  // restarts are exactly what a fifteen-day claim spans. Stamped at each boot,
+  // the log segment carries its own interpretation; read later, it can be
+  // trusted or discarded on evidence rather than on the reader's memory.
+  server.telegraphBootConfig = {
+    startedAt: new Date().toISOString(),
+    trustProxy,
+    logRequests,
+    attribution: {
+      windowMs: ATTRIBUTION_WINDOW_MS,
+      indistinguishableAbove: ATTRIBUTION_MAJORITY,
+      partialAtOrAbove: ATTRIBUTION_PARTIAL_FRACTION,
+      partialMinObserved: ATTRIBUTION_PARTIAL_MIN_SAMPLE,
+    },
+  };
 
   return server;
 }

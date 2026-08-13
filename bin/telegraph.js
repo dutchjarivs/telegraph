@@ -509,7 +509,18 @@ async function main() {
       }
       const server = createServer({ dataDir, adminToken });
       server.listen(port, () => {
-        out({ ok: true, listening: port, dataDir, admin: Boolean(adminToken), health: `http://127.0.0.1:${port}/v1/health` });
+        // The banner is the only line in the access log that isn't a request,
+        // so it is the only place a log segment can be dated and told which
+        // config produced it. Without this, a reader of the archive can order
+        // the segments and nothing else.
+        out({
+          ok: true,
+          listening: port,
+          dataDir,
+          admin: Boolean(adminToken),
+          health: `http://127.0.0.1:${port}/v1/health`,
+          boot: server.telegraphBootConfig,
+        });
       });
       // Graceful shutdown for systemd (SIGTERM) and Ctrl+C (SIGINT): stop
       // accepting new connections and let in-flight requests finish, then exit.

@@ -62,6 +62,13 @@ if (-not $relayListening) {
   $liveLog = Join-Path $root 'relay-live.log'
   if ((Test-Path $liveLog) -and ((Get-Item $liveLog).Length -gt 0)) {
     Add-Content -Path (Join-Path $root 'relay-access-archive.log') -Value (Get-Content $liveLog)
+    # Clear what we just copied. This branch assumed the respawn below would
+    # truncate the file via the stdout redirect -- but if Start-Process doesn't
+    # get that far (or something else restarted the relay), the next DOWN pass
+    # archives the SAME content again. Measured 2026-08-13: two segments,
+    # 16,167 of 38,703 archived rows (42%), present verbatim twice. Nothing
+    # detected it, because an undated log cannot tell a duplicate from a repeat.
+    Clear-Content -Path $liveLog -ErrorAction SilentlyContinue
   }
   Import-LauncherEnv   # Stripe/checkout/trust-proxy; admin token auto-loads from ./.admin-token
   Set-Location $root

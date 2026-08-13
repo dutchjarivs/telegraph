@@ -95,6 +95,11 @@ if (files.length === 0) {
 
 // Newer lines (commit adding uaClass) carry a trailing ` ua=<class>` token.
 // The token is optional so this still parses lines logged before it landed.
+// Current format: a leading ISO timestamp, so a row can say when it happened and
+// this report can say which window it is summarizing instead of implying "all of
+// it". Kept separate from LINE rather than made optional, because whether a row
+// is dated is itself a fact this report needs to publish.
+const TS_LINE = /^\[telegraph\] (\d{4}-\d\d-\d\dT[\d:.]+Z) (\S+) (\S+) (\S+) (\d{3}) \d+ms(?: ua=(\S+))?$/;
 const LINE = /^\[telegraph\] (\S+) (\S+) (\S+) (\d{3}) \d+ms(?: ua=(\S+))?$/;
 // Log lines written before 2026-07-27 (commit 73b4767) carried no client IP.
 // All traffic before then was fleet/local in practice; bucket it as such.
@@ -114,12 +119,29 @@ const stage = (method, p) => {
 const perIp = new Map(); // ip -> {discovery, registerOk, registerFail, active, total, ua:{class->count}}
 const uaDiscovery = new Map(); // ua class -> outside discovery hits (the reach-vs-bot signal)
 let parsed = 0, skipped = 0, uaTagged = 0;
+// Dated vs undated rows, the window the dated ones cover, and exact repeats.
+// The archive is appended to by the watchdog before each respawn; on 2026-08-13 a
+// segment-hash sweep found two segments (16,167 of 38,703 rows, 42%) present
+// TWICE, because archiving did not clear the file it had just copied. Distinct-IP
+// counts survived that, per-IP hit counts did not. Duplicates are invisible in an
+// undated log — two identical rows are indistinguishable from a client retrying —
+// so this can only ever catch the dated ones, and it says which it checked.
+let dated = 0, undated = 0, firstTs = null, lastTs = null;
+const rowSeen = new Set();
+let exactRepeats = 0;
 for (const file of files) {
   for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
-    let m = LINE.exec(line);
-    let ip, method, pathName, status, ua;
-    if (m) [, ip, method, pathName, status, ua] = m;
-    else if ((m = OLD_LINE.exec(line))) { ip = '::1'; [, method, pathName, status] = m; }
+    let m = TS_LINE.exec(line);
+    let ip, method, pathName, status, ua, ts = null;
+    if (m) {
+      [, ts, ip, method, pathName, status, ua] = m;
+      dated++;
+      if (!firstTs || ts < firstTs) firstTs = ts;
+      if (!lastTs || ts > lastTs) lastTs = ts;
+      const key = `${ts} ${ip} ${method} ${pathName} ${status}`;
+      if (rowSeen.has(key)) exactRepeats++; else rowSeen.add(key);
+    } else if ((m = LINE.exec(line))) { [, ip, method, pathName, status, ua] = m; undated++; }
+    else if ((m = OLD_LINE.exec(line))) { ip = '::1'; [, method, pathName, status] = m; undated++; }
     else { if (line.trim()) skipped++; continue; }
     parsed++;
     if (ua) uaTagged++;
@@ -168,6 +190,21 @@ const printRows = (rows) => {
 const printTotals = (label, rows) => console.log(`  ${label}: discovery=${sum(rows, 'discovery')} registerOk=${sum(rows, 'registerOk')} registerFail=${sum(rows, 'registerFail')} active=${sum(rows, 'active')}`);
 
 console.log(`parsed ${parsed} log lines from ${files.length} file(s) (${skipped} non-access lines skipped; ${uaTagged} carry a UA class)`);
+
+// The window, before the numbers. Every count below is over SOME period; a report
+// that doesn't name it invites the reader to supply their own, and they will
+// supply "recently". Undated rows are the older format and can't be placed at all.
+if (dated) console.log(`dated rows: ${dated}, covering ${firstTs} → ${lastTs}`);
+if (undated) {
+  console.log(`UNDATED rows: ${undated} — pre-timestamp format. These are counted in the`);
+  console.log('  totals but cannot be placed in time, so the window above does NOT bound them.');
+  console.log('  Any claim of the form "across the last N days" is unsupported by these rows.');
+}
+if (exactRepeats) {
+  console.log(`!! ${exactRepeats} EXACT REPEAT rows (same timestamp, IP, method, path, status).`);
+  console.log('!! Almost certainly double-archived, not real traffic: per-IP hit counts are inflated');
+  console.log('!! by that much. Distinct-IP counts are unaffected. Check the archive step.');
+}
 console.log(`fleet/local IPs: ${ours.length} — external-agent IPs: ${external.length} — unclassified IPs: ${unclassified.length}\n`);
 
 if (!fleetConfigured) {
