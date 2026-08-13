@@ -335,3 +335,104 @@ test('local pokes do not make the relay report broken client attribution', async
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+// ...and it has to be able to turn back ON, which the first fix got wrong.
+//
+// Raised publicly by another agent reading the repair: the obvious predicate
+// `sawUnattributable && distinct === 0` swaps a latch that can never go green
+// for one that can never go red again. `distinct` only ever increases, so the
+// first genuine client silences the check for the life of the process — and a
+// proxy that regresses later, with thousands of good reads banked, leaves it
+// false forever. A false red is loud and gets fixed. A false green has nobody
+// to file against it.
+//
+// So the verdict is a window question, and this is the edge that proves it.
+test('a proxy that regresses after real traffic is reported again', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegraph-attribution-regress-'));
+  const server = createServer({
+    dataDir,
+    trustProxy: true,
+    adminToken: 'admin-tok',
+    attributionWindowMs: 150, // an hour is the default; this is the same edge, sooner
+    limits: { lookupRate: { windowMs: 60_000, max: 100 } },
+    log: () => {},
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const health = async () => (await (await fetch(`${base}/v1/admin/overview`, {
+    headers: { 'x-telegraph-admin': 'admin-tok' },
+  })).json()).health;
+  try {
+    // Bank a pile of genuine, distinctly-attributed reads — the state in which
+    // the previous predicate became permanently, silently false.
+    for (let i = 0; i < 25; i += 1) {
+      assert.equal((await fetch(`${base}/v1/directory`, {
+        headers: { 'cf-connecting-ip': `203.0.113.${i + 1}` },
+      })).status, 200);
+    }
+    const banked = await health();
+    assert.equal(banked.clientIpsIndistinguishable, false);
+    assert.equal(banked.clientAttribution.distinct, 25);
+
+    // The proxy stops forwarding. Every client now collapses to loopback.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal((await fetch(`${base}/v1/directory`)).status, 200);
+
+    const regressed = await health();
+    assert.equal(regressed.clientIpsIndistinguishable, true,
+      '25 distinct clients an hour ago must not vouch for the proxy now');
+    assert.match(regressed.warning, /loopback/);
+    // The counts that outvoted the truth in the old predicate are still there,
+    // and still all-time — the operator reads them beside a recency, not
+    // instead of one.
+    assert.equal(regressed.clientAttribution.distinct, 25);
+    assert.ok(regressed.clientAttribution.lastDistinctAgoMs > 150);
+    assert.ok(regressed.clientAttribution.lastUnattributableAgoMs < 150);
+
+    // And it still clears on one real client, as it did before.
+    assert.equal((await fetch(`${base}/v1/directory`, {
+      headers: { 'cf-connecting-ip': '198.51.100.9' },
+    })).status, 200);
+    assert.equal((await health()).clientIpsIndistinguishable, false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+// A relay nobody is talking to is not a relay with a broken proxy. With no
+// traffic in the window at all the flag makes no claim, because it has seen
+// nothing to make one about — and it re-fires the moment traffic returns.
+test('attribution verdict makes no claim about a window with no traffic', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegraph-attribution-quiet-'));
+  const server = createServer({
+    dataDir,
+    trustProxy: true,
+    adminToken: 'admin-tok',
+    attributionWindowMs: 150,
+    log: () => {},
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const health = async () => (await (await fetch(`${base}/v1/admin/overview`, {
+    headers: { 'x-telegraph-admin': 'admin-tok' },
+  })).json()).health;
+  try {
+    assert.equal((await fetch(`${base}/v1/directory`)).status, 200);
+    assert.equal((await health()).clientIpsIndistinguishable, true,
+      'loopback and nothing else is a true thing to say while it is happening');
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const quiet = await health();
+    assert.equal(quiet.clientIpsIndistinguishable, false,
+      'nothing observed in the window means nothing to report, not a fault');
+    assert.equal(quiet.warning, undefined);
+
+    assert.equal((await fetch(`${base}/v1/directory`)).status, 200);
+    assert.equal((await health()).clientIpsIndistinguishable, true,
+      'and it comes straight back when the traffic does');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});

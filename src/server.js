@@ -136,6 +136,9 @@ export function createServer({
   // ms). Never logs bodies, query strings, or auth headers. Off unless
   // TELEGRAPH_LOG=1.
   logRequests = process.env.TELEGRAPH_LOG === '1',
+  // How far back the client-attribution verdict looks. Injectable so a test can
+  // exercise the regression edge without waiting an hour for it.
+  attributionWindowMs = 60 * 60 * 1000,
   log = console.log,
   // Webhook/push delivery config. Notify-only outbound calls when a wire lands,
   // SSRF-hardened (see webhook.js/ssrf.js). The defaults are production-safe;
@@ -280,7 +283,17 @@ export function createServer({
   // latched (see attributionIsBroken for why a latch reported nothing useful).
   // Surfaced to the operator so a silently ineffective rate limit doesn't look
   // like a working one — and so a working one doesn't look ineffective.
-  const indistinct = { total: 0, distinct: 0, loopback: 0, untrusted_proxy_header: 0 };
+  // The counts are all-time; the *verdict* is computed from the two `last*At`
+  // stamps over a window, because a counter that only ever goes up can only
+  // ever answer "has this happened", never "is this happening".
+  const indistinct = {
+    total: 0, distinct: 0, loopback: 0, untrusted_proxy_header: 0,
+    lastDistinctAt: 0, lastUnattributableAt: 0,
+  };
+  // Long enough that a relay between clients doesn't flap, short enough that a
+  // proxy that regresses is reported the same day. This is a dashboard, not a
+  // pager.
+  const ATTRIBUTION_WINDOW_MS = attributionWindowMs;
 
   // Long-poll waiters: address -> Set of held inbox requests, each with a
   // wake() that is safe to call more than once. Purely in-memory and
@@ -1743,18 +1756,27 @@ export function createServer({
             distinct: indistinct.distinct,
             loopback: indistinct.loopback,
             untrustedProxyHeader: indistinct.untrusted_proxy_header,
+            // The verdict above is a window question, so publish the window and
+            // the two recencies it is computed from. An operator who can only
+            // see all-time counts cannot tell "no distinct clients" from "no
+            // distinct clients lately", and those want different work.
+            windowMs: ATTRIBUTION_WINDOW_MS,
+            lastDistinctAgoMs: indistinct.lastDistinctAt
+              ? Date.now() - indistinct.lastDistinctAt : null,
+            lastUnattributableAgoMs: indistinct.lastUnattributableAt
+              ? Date.now() - indistinct.lastUnattributableAt : null,
           },
           ...(attributionIsBroken() ? {
             warning: indistinct.untrusted_proxy_header > 0
               ? 'requests are arriving with a forwarding header while TELEGRAPH_TRUST_PROXY is off, ' +
-                'so every client resolves to the proxy and no request has resolved to a distinct ' +
-                'address. Per-IP directory read limits are being skipped (throttling one shared ' +
-                'bucket would rate-limit every agent at once). Set TELEGRAPH_TRUST_PROXY=1 — but ' +
-                'only if the relay is reachable solely through that proxy.'
-              : 'every directory read so far has come from a loopback address and none from a ' +
-                'distinct client. If the relay is public and behind a proxy, the proxy is not ' +
-                'forwarding the client IP and per-IP read limits are being skipped. If it has ' +
-                'simply had no outside traffic yet, this clears itself on the first real client.',
+                'so every client resolves to the proxy and nothing has resolved to a distinct ' +
+                'address recently. Per-IP directory read limits are being skipped (throttling one ' +
+                'shared bucket would rate-limit every agent at once). Set TELEGRAPH_TRUST_PROXY=1 ' +
+                '— but only if the relay is reachable solely through that proxy.'
+              : 'recent directory reads have come from loopback addresses and none from a distinct ' +
+                'client. If the relay is public and behind a proxy, the proxy is not forwarding the ' +
+                'client IP and per-IP read limits are being skipped. If it has simply had no ' +
+                'outside traffic lately, this clears itself on the first real client.',
           } : {}),
         },
         pricing: { currency: PRICING.currency, processor: PRICING.processor, usdPerMillionTokens: PRICING.usdPerMillionTokens },
@@ -2095,8 +2117,24 @@ export function createServer({
   // has arrived. Both are worth the operator's attention, and both clear the
   // moment one genuine client shows up, which is the down edge the old flag
   // lacked.
-  function attributionIsBroken() {
-    return indistinct.total > 0 && indistinct.distinct === 0;
+  //
+  // Both halves are asked over a window rather than over all time. The obvious
+  // predicate — `total > 0 && distinct === 0` — replaces a latch that could
+  // never go green with one that can never go red again: `distinct` only ever
+  // increases, so the first genuine client silences the check permanently. A
+  // proxy that regresses next Tuesday, with thousands of distinct reads already
+  // banked, would leave it false forever. A false red is loud and gets fixed;
+  // a false green has no complainant, which makes it the worse of the two.
+  //
+  // With no traffic at all in the window the answer is false, not true: the
+  // flag makes a claim about observed requests, and there have been none. It
+  // re-fires on the first unattributable request after the silence.
+  function attributionIsBroken(now = Date.now()) {
+    const sawUnattributable = indistinct.lastUnattributableAt > 0
+      && now - indistinct.lastUnattributableAt <= ATTRIBUTION_WINDOW_MS;
+    const sawDistinct = indistinct.lastDistinctAt > 0
+      && now - indistinct.lastDistinctAt <= ATTRIBUTION_WINDOW_MS;
+    return sawUnattributable && !sawDistinct;
   }
 
   // Retry-After tells an honest client exactly when to come back, so a caller in
@@ -2115,18 +2153,25 @@ export function createServer({
   // Warn once per *reason*, not once per process: a relay that has been logging
   // "loopback" since boot should still say something the first time a real proxy
   // misconfiguration shows up. Both lines are cheap and neither repeats.
-  const warnedIndistinct = new Set();
+  // ...and not once per reason per *process* either, for the same reason the
+  // verdict is windowed: a fault that recurs months after it was first logged
+  // deserves a second line. Stamp the warning, re-warn once the window is up.
+  const warnedIndistinct = new Map();
   function allowLookup(req) {
     const ip = clientIp(req);
     const reason = clientsAreIndistinguishable(req, ip);
+    const now = Date.now();
     if (!reason) {
       indistinct.distinct += 1;
+      indistinct.lastDistinctAt = now;
       return allowHit(lookupMap, rateKeyForIp(ip), LIMITS.lookupRate);
     }
     indistinct.total += 1;
     indistinct[reason] += 1;
-    if (!warnedIndistinct.has(reason)) {
-      warnedIndistinct.add(reason);
+    indistinct.lastUnattributableAt = now;
+    const warnedAt = warnedIndistinct.get(reason) || 0;
+    if (now - warnedAt > ATTRIBUTION_WINDOW_MS) {
+      warnedIndistinct.set(reason, now);
       log(JSON.stringify({
         warn: 'client_ip_indistinguishable',
         reason,
