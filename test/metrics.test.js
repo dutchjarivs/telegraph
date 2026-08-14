@@ -199,3 +199,49 @@ test('a wire that expires before collection is counted, not silently dropped', a
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// The counter above can only move inside the TTL prune. This relay runs with no
+// TTL, so on the live service `expiredUncollected` is pinned at 0 by
+// configuration and reports the same value a TTL-enabled relay shows when
+// nothing has aged out. Two readings that mean different things must not
+// serialise identically, and the second witness has to be able to disagree with
+// the first — otherwise it is the counter's echo, not a check on it.
+test('with expiry off the counter says so, and the parked wires dissent from it', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegraph-parked-'));
+  const srv = createServer({ dataDir: dir, adminToken: ADMIN, limits: { registerRate: { windowMs: 60 * 60_000, max: 10_000 } } });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const b2 = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    const mk = async (h) => {
+      const c = new TelegraphClient({ server: b2, identity: TelegraphClient.generateIdentity() });
+      await c.register({ handle: h });
+      return c;
+    };
+    const a = await mk('p-a');
+    const b = await mk('p-b');
+    const snap = async () => (await (await fetch(b2 + '/v1/admin/overview', { headers: { 'x-telegraph-admin': ADMIN } })).json()).metrics;
+
+    const empty = await snap();
+    assert.equal(empty.wires.expiry.enabled, false, 'no TTL configured');
+    assert.equal(empty.wires.expiry.expiredUncollectedCanFire, false, 'so the counter is incapable of moving');
+    assert.equal(empty.wires.parked.wires, 0);
+    assert.equal(empty.wires.parked.oldestAgeMs, null, 'no parked wire is null, not zero');
+
+    await a.send('@p-b', 'nobody is coming for this one');
+    const parked = await snap();
+    // The whole point: same 0 on the counter, different reading beside it.
+    assert.equal(parked.wires.expiredUncollected, 0, 'unchanged, as it structurally must be');
+    assert.equal(parked.wires.parked.wires, 1, 'while the disk says a wire is sitting uncollected');
+    assert.equal(parked.wires.parked.mailboxes, 1);
+    assert.ok(parked.wires.parked.oldestAgeMs >= 0, 'and how long it has been waiting');
+    assert.ok(parked.wires.parked.oldestReceivedAt <= Date.now());
+
+    await b.inbox({ ack: true });
+    const drained = await snap();
+    assert.equal(drained.wires.parked.wires, 0, 'collection clears it; a counter would not have');
+    assert.equal(drained.wires.parked.oldestAgeMs, null);
+  } finally {
+    await new Promise((r) => srv.close(r));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

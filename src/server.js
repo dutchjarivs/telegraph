@@ -215,12 +215,41 @@ export function createServer({
     const s = metrics.latencySamples.slice().sort((a, b) => a - b);
     const pct = (p) => (s.length ? s[Math.min(s.length - 1, Math.floor((p / 100) * s.length))] : null);
     const rejectedTotal = Object.values(metrics.rejected).reduce((a, b) => a + b, 0);
+    // `expiredUncollected` is incremented in exactly one place: the TTL prune in
+    // loadMailbox, which returns early when no TTL is set. So on a relay with
+    // messageTtlMs = 0 the counter is not measuring an outcome, it is reporting
+    // a configuration — and it reports it with the same 0 a TTL-enabled relay
+    // shows when nothing has aged out. A reader holding only the value cannot
+    // tell those apart, which means no consumer can ever contradict it.
+    // `expiry` says which of the two a 0 means, and `parked` is the witness the
+    // counter cannot be: it is read off the mailboxes rather than accumulated by
+    // the prune, so it moves while the counter is structurally pinned.
+    const expiryEnabled = LIMITS.messageTtlMs > 0;
+    const parked = store.parkedWireStats();
+    const now = Date.now();
     return {
       sinceStart: metrics.since,
       wires: {
         accepted: metrics.accepted,
         collected: metrics.collected,
         expiredUncollected: metrics.expiredUncollected,
+        expiry: {
+          enabled: expiryEnabled,
+          ttlMs: LIMITS.messageTtlMs,
+          // Without a TTL nothing can expire, so the counter above is incapable
+          // of ever being nonzero. Said here rather than left to be inferred.
+          expiredUncollectedCanFire: expiryEnabled,
+        },
+        // Uncollected wires currently on disk, and how long the oldest has been
+        // waiting. Survives restarts (the counters do not) and is the metric
+        // that answers "was anyone charged for a wire nobody ever got" on a
+        // relay where expiry is off.
+        parked: {
+          mailboxes: parked.mailboxes,
+          wires: parked.wires,
+          oldestReceivedAt: parked.oldestReceivedAt,
+          oldestAgeMs: parked.oldestReceivedAt === null ? null : Math.max(0, now - parked.oldestReceivedAt),
+        },
         duplicate: metrics.duplicate,
         rejected: rejectedTotal,
         rejectedByReason: { ...metrics.rejected },

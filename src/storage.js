@@ -446,6 +446,43 @@ export class Storage {
     return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
   }
 
+  // Parked (accepted, not yet collected) wires, read straight off disk rather
+  // than from a counter the delivery path maintains. This is deliberately a
+  // second, independently-authored witness: `expiredUncollected` only ever
+  // increments inside the TTL prune, so with no TTL configured it is pinned at
+  // 0 and a reader cannot tell "nothing aged out" from "nothing can age out".
+  // The oldest parked wire is written by the accept path and read here, so it
+  // moves when that counter structurally cannot, and it can contradict it.
+  parkedWireStats() {
+    let mailboxes = 0;
+    let wires = 0;
+    let oldestReceivedAt = null;
+    let files;
+    try {
+      files = fs.readdirSync(this.mailboxDir);
+    } catch {
+      return { mailboxes: 0, wires: 0, oldestReceivedAt: null };
+    }
+    for (const name of files) {
+      if (!name.endsWith('.json') || name.endsWith('.seen.json')) continue;
+      let parked;
+      try {
+        parked = JSON.parse(fs.readFileSync(path.join(this.mailboxDir, name), 'utf8'));
+      } catch {
+        continue; // a mid-write or hand-edited file is not a reason to lose the rest
+      }
+      if (!Array.isArray(parked) || parked.length === 0) continue;
+      mailboxes += 1;
+      wires += parked.length;
+      for (const m of parked) {
+        const at = m?.receivedAt;
+        if (typeof at !== 'number') continue;
+        if (oldestReceivedAt === null || at < oldestReceivedAt) oldestReceivedAt = at;
+      }
+    }
+    return { mailboxes, wires, oldestReceivedAt };
+  }
+
   saveMailbox(address, messages) {
     atomicWrite(this.mailboxFile(address), JSON.stringify(messages, null, 2));
   }
