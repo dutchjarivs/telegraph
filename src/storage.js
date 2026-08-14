@@ -453,15 +453,25 @@ export class Storage {
   // 0 and a reader cannot tell "nothing aged out" from "nothing can age out".
   // The oldest parked wire is written by the accept path and read here, so it
   // moves when that counter structurally cannot, and it can contradict it.
+  // `unreadable` and `dirUnreadable` exist because this function used to exit an
+  // unparseable mailbox through the same `continue` as an empty one, so a
+  // corrupted file was reported as a mailbox holding nothing. That is silent in
+  // the wrong direction: truncating the single file holding the oldest parked
+  // wire moved the census from 31 wires / 41.71 days to 30 / 39.98 with no
+  // signal, i.e. the instrument's own read failure improves the neglect number
+  // it exists to report. Counting the failure is the difference between a
+  // reading and a reading you are entitled to believe.
   parkedWireStats() {
     let mailboxes = 0;
     let wires = 0;
+    let unreadable = 0;
     let oldestReceivedAt = null;
     let files;
     try {
       files = fs.readdirSync(this.mailboxDir);
     } catch {
-      return { mailboxes: 0, wires: 0, oldestReceivedAt: null };
+      // Distinct from an empty relay: 0/0/null here means "could not look".
+      return { mailboxes: 0, wires: 0, unreadable: 0, dirUnreadable: true, oldestReceivedAt: null };
     }
     for (const name of files) {
       if (!name.endsWith('.json') || name.endsWith('.seen.json')) continue;
@@ -469,9 +479,14 @@ export class Storage {
       try {
         parked = JSON.parse(fs.readFileSync(path.join(this.mailboxDir, name), 'utf8'));
       } catch {
-        continue; // a mid-write or hand-edited file is not a reason to lose the rest
+        unreadable += 1; // a mid-write or hand-edited file is not a reason to lose
+        continue; // the rest — but it is a reason not to call the total a census
       }
-      if (!Array.isArray(parked) || parked.length === 0) continue;
+      if (!Array.isArray(parked)) {
+        unreadable += 1;
+        continue;
+      }
+      if (parked.length === 0) continue;
       mailboxes += 1;
       wires += parked.length;
       for (const m of parked) {
@@ -480,7 +495,7 @@ export class Storage {
         if (oldestReceivedAt === null || at < oldestReceivedAt) oldestReceivedAt = at;
       }
     }
-    return { mailboxes, wires, oldestReceivedAt };
+    return { mailboxes, wires, unreadable, dirUnreadable: false, oldestReceivedAt };
   }
 
   saveMailbox(address, messages) {

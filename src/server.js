@@ -248,6 +248,15 @@ export function createServer({
         parked: {
           mailboxes: parked.mailboxes,
           wires: parked.wires,
+          // Mailbox files the census could not parse, and whether the mailbox
+          // directory itself could not be listed. Without these a silent read
+          // failure is indistinguishable from good news: an unreadable mailbox
+          // used to be counted as an empty one, which lowers `wires` and can
+          // *raise* `oldestReceivedAt` toward the present. Nonzero `unreadable`
+          // or `dirUnreadable` means the three numbers below are a lower bound
+          // on parked wires and an optimistic bound on the oldest, not a census.
+          unreadable: parked.unreadable,
+          dirUnreadable: parked.dirUnreadable,
           oldestReceivedAt: parked.oldestReceivedAt,
           oldestAgeMs: parked.oldestReceivedAt === null ? null : Math.max(0, now - parked.oldestReceivedAt),
         },

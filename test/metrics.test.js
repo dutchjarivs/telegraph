@@ -245,3 +245,55 @@ test('with expiry off the counter says so, and the parked wires dissent from it'
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// The parked census is the only reader that can contradict `expiredUncollected`,
+// so its own read failures have to be visible. They were not: an unparseable
+// mailbox file left the loop through the same `continue` as an empty one, which
+// makes a corrupted mailbox report as a mailbox holding nothing. That is silent
+// in the flattering direction — it lowers the wire count and can move
+// `oldestReceivedAt` toward the present, improving the neglect figure precisely
+// because the evidence stopped being readable. A check needs an input that makes
+// it go red; this is that input.
+test('an unreadable mailbox is counted, not silently read as an empty one', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegraph-unreadable-'));
+  const srv = createServer({ dataDir: dir, adminToken: ADMIN, limits: { registerRate: { windowMs: 60 * 60_000, max: 10_000 } } });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const b2 = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    const mk = async (h) => {
+      const c = new TelegraphClient({ server: b2, identity: TelegraphClient.generateIdentity() });
+      await c.register({ handle: h });
+      return c;
+    };
+    const a = await mk('u-a');
+    await mk('u-b');
+    const snap = async () => (await (await fetch(b2 + '/v1/admin/overview', { headers: { 'x-telegraph-admin': ADMIN } })).json()).metrics;
+
+    await a.send('@u-b', 'this one is about to become unreadable');
+    const before = await snap();
+    assert.equal(before.wires.parked.wires, 1);
+    assert.equal(before.wires.parked.unreadable, 0, 'nothing is wrong yet, and the field says so');
+    assert.equal(before.wires.parked.dirUnreadable, false);
+
+    // A well-formed file that is not a mailbox. Deliberately NOT a truncated
+    // one: a mailbox that fails JSON.parse currently throws out of
+    // Storage.loadMailbox, which 500s this route, the recipient's inbox, and
+    // anyone sending to them. That is a separate defect and it is not this
+    // census's to swallow — returning [] there would let the next write
+    // overwrite wires the relay merely failed to read. Tracked in WORKLOG.
+    const mdir = path.join(dir, 'mailboxes');
+    const box = fs.readdirSync(mdir).find((f) => f.endsWith('.json') && !f.endsWith('.seen.json')
+      && JSON.parse(fs.readFileSync(path.join(mdir, f), 'utf8')).length > 0);
+    fs.writeFileSync(path.join(mdir, box), '{"not":"an array"}');
+
+    const after = await snap();
+    assert.equal(after.wires.parked.wires, 0, 'the wire is genuinely no longer countable');
+    assert.equal(after.wires.parked.oldestAgeMs, null, 'and the age it was carrying went with it');
+    // Without this the two lines above are byte-identical to a healthy, drained
+    // relay. This is the whole difference between a reading and a renderer.
+    assert.equal(after.wires.parked.unreadable, 1, 'so the failure has to appear somewhere');
+  } finally {
+    await new Promise((r) => srv.close(r));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
