@@ -275,12 +275,12 @@ test('an unreadable mailbox is counted, not silently read as an empty one', asyn
     assert.equal(before.wires.parked.unreadable, 0, 'nothing is wrong yet, and the field says so');
     assert.equal(before.wires.parked.dirUnreadable, false);
 
-    // A well-formed file that is not a mailbox. Deliberately NOT a truncated
-    // one: a mailbox that fails JSON.parse currently throws out of
-    // Storage.loadMailbox, which 500s this route, the recipient's inbox, and
-    // anyone sending to them. That is a separate defect and it is not this
-    // census's to swallow — returning [] there would let the next write
-    // overwrite wires the relay merely failed to read. Tracked in WORKLOG.
+    // A well-formed file that is not a mailbox. This is one of the two ways a
+    // mailbox can be unreadable, and it is the one that does NOT throw. The
+    // other — a file that fails JSON.parse — used to 500 this entire route
+    // before it could render the field being asserted below, which meant this
+    // assertion passed on the only corruption shape that let it run. See the
+    // truncated-file test underneath; both inputs now reach the census.
     const mdir = path.join(dir, 'mailboxes');
     const box = fs.readdirSync(mdir).find((f) => f.endsWith('.json') && !f.endsWith('.seen.json')
       && JSON.parse(fs.readFileSync(path.join(mdir, f), 'utf8')).length > 0);
@@ -292,6 +292,54 @@ test('an unreadable mailbox is counted, not silently read as an empty one', asyn
     // Without this the two lines above are byte-identical to a healthy, drained
     // relay. This is the whole difference between a reading and a renderer.
     assert.equal(after.wires.parked.unreadable, 1, 'so the failure has to appear somewhere');
+  } finally {
+    await new Promise((r) => srv.close(r));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The test above picked the one corruption shape that cannot throw. A truncated
+// file — the shape an interrupted write or a full disk actually produces — threw
+// out of Storage.loadMailbox inside the per-agent .map at the top of the same
+// handler, so the response died before reaching the census that exists to report
+// it. The detector's red branch was live in the suite and dead on the route: the
+// operator got `internal_error`, which names no agent and looks like the service
+// is down rather than like one file on disk is bad. This test is that input, at
+// the route, because the route is the only thing an operator can call.
+test('a truncated mailbox renders as unreadable instead of 500ing the whole overview', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegraph-truncated-'));
+  const srv = createServer({ dataDir: dir, adminToken: ADMIN, limits: { registerRate: { windowMs: 60 * 60_000, max: 10_000 } } });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const b2 = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    const mk = async (h) => {
+      const c = new TelegraphClient({ server: b2, identity: TelegraphClient.generateIdentity() });
+      await c.register({ handle: h });
+      return c;
+    };
+    const a = await mk('t-a');
+    await mk('t-b');
+    await a.send('@t-b', 'this wire is about to become unparseable');
+
+    const mdir = path.join(dir, 'mailboxes');
+    const box = fs.readdirSync(mdir).find((f) => f.endsWith('.json') && !f.endsWith('.seen.json')
+      && JSON.parse(fs.readFileSync(path.join(mdir, f), 'utf8')).length > 0);
+    const raw = fs.readFileSync(path.join(mdir, box), 'utf8');
+    fs.writeFileSync(path.join(mdir, box), raw.slice(0, Math.floor(raw.length / 2)));
+
+    const res = await fetch(b2 + '/v1/admin/overview', { headers: { 'x-telegraph-admin': ADMIN } });
+    assert.equal(res.status, 200, 'one bad file must not take down the operator view');
+    const body = await res.json();
+    assert.equal(body.metrics.wires.parked.unreadable, 1, 'the census has to survive to say so');
+
+    // The count the operator reads per agent has to distinguish "could not look"
+    // from "nothing there" — 0 would be the same flattering lie in a new place.
+    const broken = body.agents.filter((x) => x.mailbox.unreadable);
+    assert.equal(broken.length, 1, 'and it has to name which agent, which a 500 never could');
+    assert.equal(broken[0].mailbox.count, null, 'not 0 — that would be the silent read all over again');
+    assert.equal(broken[0].mailbox.oldestReceivedAt, null);
+    assert.ok(body.agents.every((x) => x.mailbox.unreadable || typeof x.mailbox.count === 'number'),
+      'the healthy mailboxes still report a real depth');
   } finally {
     await new Promise((r) => srv.close(r));
     fs.rmSync(dir, { recursive: true, force: true });

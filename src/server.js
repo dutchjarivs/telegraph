@@ -1874,7 +1874,24 @@ export function createServer({
       const today = new Date().toISOString().slice(0, 10);
       const agents = store.listAgents().map((a) => {
         const bill = store.getBilling(a.address);
-        const mailbox = loadMailbox(a.address);
+        // One corrupt mailbox file used to throw here, inside a .map over every
+        // agent, which 500'd the whole overview — including the census further
+        // down that exists to report exactly this condition. The branch was
+        // reachable in the unit test (which calls parkedWireStats) and
+        // unreachable on the only route that renders it. Caught HERE, at the
+        // call site, and deliberately not inside loadMailbox: on the send and
+        // collect paths an empty read is followed by a save that would
+        // overwrite the unread wires we merely failed to parse. This path is
+        // read-only, so catching costs nothing and buys the operator an
+        // address — `internal_error` names no agent and reads like a service
+        // fault rather than one bad file on disk.
+        let mailbox = [];
+        let mailboxUnreadable = false;
+        try {
+          mailbox = loadMailbox(a.address);
+        } catch {
+          mailboxUnreadable = true;
+        }
         const standing = reportStats(a.address);
         const hook = store.getWebhook(a.address);
         return {
@@ -1889,8 +1906,11 @@ export function createServer({
           suspended: store.getModeration(a.address).suspended,
           reports: standing,
           mailbox: {
-            count: mailbox.length,
-            oldestReceivedAt: mailbox.length ? mailbox[0].receivedAt : null,
+            // null, not 0: a depth of 0 is the same silent lie the census used
+            // to tell about an unparseable file. "Could not read" is not "empty".
+            count: mailboxUnreadable ? null : mailbox.length,
+            oldestReceivedAt: mailboxUnreadable || !mailbox.length ? null : mailbox[0].receivedAt,
+            unreadable: mailboxUnreadable,
           },
           // Webhook summary (never the secret) so the operator can see push
           // config and spot a hook the breaker has disabled.
