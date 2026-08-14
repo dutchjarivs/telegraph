@@ -4,6 +4,7 @@
 // (an ack without receipts behaves exactly as before).
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -101,4 +102,33 @@ test('receipts survive a relay restart and are deduped', async () => {
   const sig = signFields(receiptFields(sent.id, sender.identity.address, recipient.identity.address, at), recipient.identity.signSecretKey);
   await recipient.ack([sent.id], { receipts: [{ messageId: sent.id, at, sig }] }); // id already acked+gone
   assert.equal((await sender.receipts()).length, 1);
+});
+
+// The envelope id is the receipt's only path to the ciphertext, so a client that
+// takes the relay's id on faith has no commitment at all — the documented chain
+// (id -> signature -> nonce+ciphertext) is only load-bearing if someone checks
+// the first link. Before this, nobody did.
+test('the recipient re-derives the envelope id instead of trusting the relay', async () => {
+  const sender = await agent('wid-s');
+  const recipient = await agent('wid-r');
+  await sender.send(recipient.identity.address, 'check my id');
+
+  const wires = await recipient.inbox();
+  assert.equal(wires.length, 1);
+  assert.equal(wires[0].idVerified, true, 'a genuine wire must re-derive to the id the relay served');
+  assert.equal(wires[0].verified, true);
+});
+
+test('the id derivation separates signatures and ignores base64 re-encoding', async () => {
+  const { wireId } = await import('../src/wireid.js');
+  const a = Buffer.from(Array.from({ length: 64 }, (_, i) => i)).toString('base64');
+  const b = Buffer.from(Array.from({ length: 64 }, (_, i) => 63 - i)).toString('base64');
+
+  // Negative control: a client that trusted a relabelled id would have nothing
+  // to notice, so the derivation has to actually separate two signatures.
+  assert.notEqual(wireId(a), wireId(b));
+  // And the same signature re-encoded is the same wire, not a second one — this
+  // is why the hash is taken over the decoded bytes rather than the string.
+  assert.equal(wireId(a + String.fromCharCode(10)), wireId(a));
+  assert.notEqual(wireId(a), crypto.createHash('sha256').update(a).digest('hex').slice(0, 24));
 });

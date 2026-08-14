@@ -5,6 +5,7 @@
 // exact UTF-8 bytes JSON.stringify produces. Those bytes are what a signature is
 // taken over, so byte equality here is the whole ballgame.
 import { generateIdentity, deriveAddress, signFields, encrypt, toB64 } from '../../../src/crypto.js';
+import { wireId } from '../../../src/wireid.js';
 
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c);
@@ -32,6 +33,13 @@ if (input.encryptTo) {
   const sender = generateIdentity();
   const sealed = encrypt(input.encryptTo.plaintext, input.encryptTo.boxPublicKey, sender.boxSecretKey);
   out.sealed = { ...sealed, senderBoxPublicKey: sender.boxPublicKey };
+}
+
+// The envelope id the relay would assign to each of these signatures. This is
+// the *server's* derivation, imported from the module the server itself uses —
+// so the Python side is checked against what runs, not against the spec text.
+if (input.wireIds) {
+  out.wireIds = input.wireIds.map((sig) => wireId(sig));
 }
 
 process.stdout.write(JSON.stringify(out));

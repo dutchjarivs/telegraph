@@ -158,6 +158,21 @@ def body_hash(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def wire_id(sig_b64: str) -> str:
+    """The relay's envelope id for a wire: SHA-256 over the *decoded* signature
+    bytes, first 24 lowercase hex chars.
+
+    Decoded, not the base64 string. Base64 decoders ignore trailing whitespace
+    and other stray characters, so two encodings of one signature verify
+    identically; hashing the string would let the same wire carry two ids.
+
+    Exists so a client can check the id the relay handed it instead of trusting
+    it. The signature covers nonce+ciphertext, so an id that re-derives is a
+    (96-bit, indirect) commitment to the bytes you were served.
+    """
+    return hashlib.sha256(from_b64(sig_b64)).hexdigest()[:24]
+
+
 # --- E2EE -------------------------------------------------------------------
 
 def encrypt(plaintext: str, recipient_box_public_key_b64: str, sender_box_secret_key_b64: str):

@@ -16,6 +16,7 @@ import {
   toB64,
   fromB64,
 } from './crypto.js';
+import { wireId } from './wireid.js';
 import {
   packWire,
   unpackWire,
@@ -226,6 +227,11 @@ export class TelegraphClient {
       let priority = null;
       let expiresAt = null;
       let attachments = [];
+      // The relay hands us an id. Re-derive it rather than believe it: the id is
+      // SHA-256 over the sender's signature, and that signature covers the
+      // nonce and ciphertext, so an id that re-derives is the relay's own
+      // (96-bit, indirect) commitment to the bytes it just served us.
+      const idVerified = typeof m.sig === 'string' && typeof m.id === 'string' && wireId(m.sig) === m.id;
       if (sender && sender.address === m.from && verifyAgentRecord(sender)) {
         const sigOk = verifyFields(
           messageFields(m.to, m.from, m.nonce, m.ciphertext, m.ts),
@@ -246,6 +252,7 @@ export class TelegraphClient {
       }
       return {
         id: m.id,
+        idVerified,
         from: m.from,
         fromHandle: sender?.handle ?? null,
         ts: m.ts,

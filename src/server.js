@@ -8,6 +8,7 @@ import crypto from 'node:crypto';
 import { Storage } from './storage.js';
 import { deliverOnce } from './webhook.js';
 import { parseWebhookUrl } from './ssrf.js';
+import { wireId } from './wireid.js';
 import {
   registerFields,
   messageFields,
@@ -2610,13 +2611,6 @@ export function rateKeyForIp(ip) {
   return `${groups.slice(0, 4).join(':')}::/64`;
 }
 
-// Wire id: hash the DECODED signature bytes, not the base64 string. A
-// re-encoded signature (Node's base64 decoder ignores trailing whitespace and
-// other stray chars) verifies identically, so hashing the string would let the
-// same wire produce a different id and slip past duplicate suppression.
-function wireId(sig) {
-  return crypto.createHash('sha256').update(fromB64(sig)).digest('hex').slice(0, 24);
-}
 
 // Stripe-Signature header: "t=<unix seconds>,v1=<hex hmac>[,v1=...]"
 function parseStripeSigHeader(header) {

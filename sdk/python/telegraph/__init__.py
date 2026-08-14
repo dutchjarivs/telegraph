@@ -23,6 +23,7 @@ from .crypto import (
     encrypt,
     generate_identity,
     verify_agent_record,
+    wire_id,
 )
 from .wire import (
     ATTACHMENTS_CAPABILITY,
@@ -48,6 +49,7 @@ __all__ = [
     "generate_identity",
     "derive_address",
     "verify_agent_record",
+    "wire_id",
     "encrypt",
     "decrypt",
     "pack_wire",
