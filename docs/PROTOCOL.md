@@ -80,7 +80,7 @@ Records may additionally carry moderation fields set by the relay (not covered b
 
 ### `POST /v1/messages`
 Body: `{to, from, nonce, ciphertext, ts, sig, sentCopy?, idempotencyKey?}` — `sig` per Message row, signed by sender's `signSecretKey`.
-Server verifies: sender registered, signature valid, recipient exists, `ts` within ±10 min, ciphertext ≤ the relay's cap (**16 KB base64** on the public relay today; an operator can raise it via `TELEGRAPH_MAX_CIPHERTEXT_B64` once the current build is deployed — see the wire-envelope section), rate ≤ 60/min per sender, mailbox < 500. Envelope id = first 24 hex chars of SHA-256(sig); duplicate ids are accepted but not re-stored (`{ok, id, duplicate: true}`).
+Server verifies: sender registered, signature valid, recipient exists, `ts` within ±10 min, ciphertext ≤ the relay's cap (**16 KB base64** on the public relay today; an operator can raise it via `TELEGRAPH_MAX_CIPHERTEXT_B64` once the current build is deployed — see the wire-envelope section), rate ≤ 60/min per sender, mailbox < 500. Envelope id = first 24 lowercase hex chars of SHA-256 over the **base64-decoded signature bytes** — not over the base64 string. (Base64 decoders ignore trailing whitespace and other stray characters, so two encodings of the same signature verify identically; hashing the string would let one wire produce two ids and slip past dedup.) Duplicate ids are accepted but not re-stored (`{ok, id, duplicate: true}`).
 `sentCopy` (optional) = `{nonce, ciphertext}`: the same plaintext sealed with `nacl.box` to the **sender's own** box key. The relay stores it in the sender's sent log (ring buffer, most recent 200; not billed; not signed — it is the sender's private convenience history, readable only by the sender). Malformed copies are rejected (`bad_sent_copy`) before any charge.
 `idempotencyKey` (optional) — A non-empty string ≤ 128 chars. Scoped per **sender**: if the same sender already delivered a wire under this key within 24 h, the relay returns that wire's id with `{ok, id, duplicate: true, idempotent: true}` and neither re-delivers nor re-charges. It is the safety net for a send retried after a dropped response (a fresh send picks a new nonce, so the envelope-id dedup alone would deliver twice). Unsigned — a relay-side dedup hint for accidental retries, not an end-to-end authenticated field. Invalid keys are rejected (`bad_idempotency_key`) before any charge. The per-sender ledger keeps the most recent 256 keys.
 → `{ok, id}` (fresh) or `{ok, id, duplicate: true, idempotent: true}` (idempotent replay)
@@ -99,6 +99,19 @@ Body: `{ids: [string], receipts?: [{messageId, at, sig}]}`. Auth as above with `
 ### `GET /v1/receipts` (signed)
 Delivery receipts for wires **you** sent — recipient-signed proof they were fetched and acked. Verify each client-side against the recipient's registered key over `["telegraph-receipt-v1", messageId, yourAddress, recipientAddress, at]`.
 → `{count, receipts: [{messageId, recipient, recipientHandle, from, at, sig}]}`
+
+#### What a receipt commits to — and what it does not
+
+The signed field list contains no ciphertext, so the binding to the bytes is **indirect**. State it as a bounded claim rather than inferring it from the word *delivery*:
+
+| Question | Answer |
+| --- | --- |
+| Canonical byte string signed | `utf8(JSON.stringify(["telegraph-receipt-v1", messageId, senderAddress, recipientAddress, at]))` |
+| Signature scheme | detached Ed25519, recipient's registered `signPublicKey` |
+| Path to the ciphertext | `messageId` = SHA-256(decoded sender signature)[0:24 hex], and the sender's signature covers `nonce`+`ciphertext` — so the id commits to the bytes **transitively**, through a 96-bit truncation |
+| Verification an independent reader must run | (1) check the receipt signature over the field list above against the recipient's directory record; (2) separately re-verify the **sender's** signature over the ciphertext you hold (`telegraph verify`, or `messageFields(to, from, nonce, ciphertext, ts)` in the SDK). Step 2 is what makes step 1 say anything about content — the relay cannot swap ciphertext under a receipt without breaking it. |
+
+**What a receipt is not.** Scored against the fields a general approval object needs, it carries **2 of 6**: an artifact reference (via `messageId`) and a time (`at`). It carries **no scope, no bounds, no expiry, and no policy version** — a receipt says *this address fetched and acked this envelope at this time*, and nothing about what the recipient agreed to, for how long, or under which rules. Do not build authorization on one.
 
 ### `GET /v1/sent` (signed)
 Auth as for `GET /v1/inbox`.
