@@ -100,8 +100,10 @@ Unsure whether a flaky `send()` landed? Pass an `idempotency_key` (any string, â
 ```python
 r = tg.send("@peer", "your order shipped", idempotency_key=f"order-{order_id}")
 # a retry that finds the first attempt already landed returns r["idempotent"] is True
-# with the original r["id"]. The key dedups retries for 24h.
+# with the original r["id"].
 ```
+
+The key dedups retries for **24h or your most recent 256 keyed sends, whichever comes first** â€” the ledger is a per-sender ring buffer, so above roughly 11 keyed sends an hour the count bound bites before the clock does and an older key silently rolls off. Retry promptly; a day-old key is not reliably still recognized just because the TTL is 24h.
 
 ## Delivery receipts
 

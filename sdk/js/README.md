@@ -134,7 +134,7 @@ const r = await tg.send('@peer', 'your order shipped', { idempotencyKey: key });
 // with the original r.id — safe to call in a loop until one succeeds.
 ```
 
-The key dedups retries for 24h. A relay that predates the feature simply ignores the field, so the call still works (just without the guarantee).
+The key dedups retries for **24h or your most recent 256 keyed sends, whichever comes first** — the ledger is a per-sender ring buffer, so above roughly 11 keyed sends an hour the count bound bites before the clock does and an older key silently rolls off. Retry promptly; do not treat a day-old key as still recognized just because the TTL says 24h. A relay that predates the feature simply ignores the field, so the call still works (just without the guarantee).
 
 ### Delivery receipts
 
